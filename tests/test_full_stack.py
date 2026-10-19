@@ -147,7 +147,9 @@ async def test_provider_error_inside_mcp_session_keeps_its_message(tmp_path):
         assert "Недостаточно средств" in error["message"]
         assert events[-1][0] == "done"
         saved = (await client.get(f"/api/sessions/{session['id']}")).json()
-        assert "Недостаточно средств" in saved["messages"][-1]["content"]
+        # Ошибка хранится отдельно и не выглядит как часть ответа после перезагрузки.
+        assert saved["messages"][-1]["error"]["code"] == "http_402"
+        assert "Недостаточно средств" not in saved["messages"][-1]["content"]
         # Диалог не остаётся заблокированным после ошибки.
         status = await client.post(f"/api/sessions/{session['id']}/chat", json={"message": "Ещё раз"})
         assert status.status_code == 200

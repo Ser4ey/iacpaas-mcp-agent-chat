@@ -51,10 +51,13 @@ class SessionStore:
             content TEXT NOT NULL, created_at TEXT NOT NULL, trace TEXT NOT NULL,
             usage TEXT NOT NULL, model_messages TEXT NOT NULL);
         """)
-        # Миграция: признак «ответ опирается на данные инструментов» появился позже.
+        # Миграция: признак «ответ опирается на данные инструментов» и ошибка хода
+        # (отдельно от текста ответа) появились позже.
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(messages)")}
         if "grounded" not in columns:
             self.db.execute("ALTER TABLE messages ADD COLUMN grounded INTEGER")
+        if "error" not in columns:
+            self.db.execute("ALTER TABLE messages ADD COLUMN error TEXT")
         self.db.commit()
 
     def create(self) -> dict:
@@ -76,6 +79,7 @@ class SessionStore:
                 message[key] = json.loads(message[key])
             message["usage"] = with_cost(message["usage"], self.model_info)
             message["grounded"] = None if message["grounded"] is None else bool(message["grounded"])
+            message["error"] = json.loads(message["error"]) if message["error"] else None
             usage = add_usage(usage, message["usage"])
             message.pop("session_id")
             message.pop("model_messages")
@@ -107,20 +111,23 @@ class SessionStore:
             result.extend(stored)
         return result
 
-    def save_turn(self, session_id: str, user: str, answer: str, trace: list,
-                  usage: dict, model_messages: list | None = None, grounded: bool | None = None) -> str:
+    def save_turn(self, session_id: str, user: str, answer: str, trace: list, usage: dict,
+                  model_messages: list | None = None, grounded: bool | None = None,
+                  error: dict | None = None) -> str:
+        """error — {"message", "code"}: остановка или сбой хода, хранится отдельно от текста ответа."""
         assistant_id = uuid.uuid4().hex
         timestamp = now()
+        insert = ("INSERT INTO messages (id, session_id, role, content, created_at, trace, usage, "
+                  "model_messages, grounded, error) VALUES (?,?,?,?,?,?,?,?,?,?)")
         with self._lock, self.db:
             # The user and assistant appear together; interrupted tool exchanges
             # never leave an invalid tool_call without a corresponding result.
-            self.db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,NULL)",
-                            (uuid.uuid4().hex, session_id, "user", user, timestamp, "[]", "{}", "[]"))
-            self.db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?)",
-                            (assistant_id, session_id, "assistant", answer, timestamp,
-                             json.dumps(trace, ensure_ascii=False), json.dumps(usage),
-                             json.dumps(model_messages or [{"role": "assistant", "content": answer}], ensure_ascii=False),
-                             None if grounded is None else int(grounded)))
+            self.db.execute(insert, (uuid.uuid4().hex, session_id, "user", user, timestamp, "[]", "{}", "[]", None, None))
+            self.db.execute(insert, (assistant_id, session_id, "assistant", answer, timestamp,
+                                     json.dumps(trace, ensure_ascii=False), json.dumps(usage),
+                                     json.dumps(model_messages or [{"role": "assistant", "content": answer}], ensure_ascii=False),
+                                     None if grounded is None else int(grounded),
+                                     json.dumps(error, ensure_ascii=False) if error else None))
             self.db.execute("UPDATE sessions SET title=CASE WHEN title='Новый диалог' THEN ? ELSE title END,updated_at=? WHERE id=?",
                             (user[:70], timestamp, session_id))
         return assistant_id

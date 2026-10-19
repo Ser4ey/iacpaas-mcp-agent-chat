@@ -1,551 +1,711 @@
-/* Browser state stays deliberately small. Credentials and model calls live on the server. */
-const $ = (id) => document.getElementById(id);
-const state = {
-  status: null,
-  sessions: [],
-  session: null,
-  streaming: false,
-  controller: null,
-  refreshing: false,
-};
-const number = new Intl.NumberFormat('ru-RU');
+/*
+ * Интерфейс чата с ассистентом по базе материалов IACPaaS.
+ *
+ * Модули:
+ *   api.js       — запросы к серверу и чтение потока SSE;
+ *   markdown.js  — безопасный рендер ответа модели (только DOM-узлы);
+ *   trace.js     — журнал вызовов MCP-инструментов;
+ *   data-view.js — раздел «Данные»;
+ *   format.js    — числа, склонения, рубли, даты.
+ * Здесь — состояние, разделы, список диалогов, отправка вопроса и индикатор расхода.
+ */
+import { api, streamChat } from './api.js';
+import { renderDataView, renderIndexStatus } from './data-view.js';
+import { formatCompact, formatCost, formatNumber, formatShortDate, plural } from './format.js';
+import { renderMarkdown } from './markdown.js';
+import { ToolLog, normalizeTrace, toolActivity } from './trace.js';
 
-function element(tag, className, text) {
+const $ = (id) => document.getElementById(id);
+
+const DEFAULT_SUGGESTIONS = [
+  'Какой химический состав у стали 12Х18Н10Т?',
+  'Какие сплавы на основе титана есть в справочнике?',
+  'Какие свойства описаны для сплава Д16?',
+  'В каких единицах записан предел прочности?',
+];
+
+const STATUS_POLL_MS = 12000;
+const STATUS_POLL_BUSY_MS = 3000; // пока обновляется индекс, опрашиваем чаще
+const NARROW_SCREEN = window.matchMedia('(max-width: 820px)');
+
+const state = {
+  view: 'chat',            // 'chat' или 'data'
+  status: null,            // ответ GET /api/status
+  overview: null,          // ответ GET /api/data/overview
+  overviewError: '',
+  sessions: [],            // краткий список диалогов
+  session: null,           // открытый диалог с сообщениями
+  streaming: false,
+  controller: null,        // AbortController текущего ответа (кнопка «Стоп»)
+  refreshRequested: false, // нажата «Обновить из IACPaaS», ждём ответа сервера
+};
+
+function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
+  if (text !== undefined && text !== null) node.textContent = text;
   return node;
 }
 
-async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-  });
-  if (!response.ok) {
-    let message = `Сервер ответил ${response.status}`;
-    try {
-      const data = await response.json();
-      message = data.detail || data.message || message;
-      if (typeof message !== 'string') message = JSON.stringify(message);
-    } catch { /* An upstream error can have a non-JSON response. */ }
-    throw new Error(message);
+/* ---------- Ошибки ---------- */
+
+function showError(error) {
+  $('error-text').textContent = typeof error === 'string' ? error : error?.message ?? 'Неизвестная ошибка.';
+  $('error-notice').hidden = false;
+}
+
+function hideError() {
+  $('error-notice').hidden = true;
+}
+
+/* ---------- Разделы «Диалоги» и «Данные» ---------- */
+
+function viewFromHash() {
+  return location.hash === '#data' ? 'data' : 'chat';
+}
+
+function showView(view) {
+  state.view = view;
+  $('view-chat').hidden = view !== 'chat';
+  $('view-data').hidden = view !== 'data';
+  $('meter').hidden = view !== 'chat';
+  for (const [name, link] of [['chat', $('nav-chat')], ['data', $('nav-data')]]) {
+    if (name === view) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
   }
-  if (response.status === 204) return null;
-  return response.json();
+  renderNotices();
+  closeSidebar();
 }
 
-function showError(message) {
-  $('error-text').textContent = message;
-  $('error-banner').hidden = false;
+function goToView(view) {
+  const hash = view === 'data' ? '#data' : '#chat';
+  if (location.hash !== hash) history.pushState(null, '', hash);
+  showView(view);
 }
 
-function updateComposer() {
-  $('send-button').hidden = state.streaming;
-  $('stop-button').hidden = !state.streaming;
-  $('send-button').disabled = !state.status?.configured || !$('message-input').value.trim();
-  $('new-chat').disabled = state.streaming;
-  $('message-input').disabled = state.streaming;
-}
-
-function updateUsage(usage = {}, context = 0, estimated = false) {
-  const tokens = usage.total_tokens || 0;
-  $('session-usage').textContent = usage.known === false ? `Сессия: ${tokens ? `≥ ${number.format(tokens)} токенов` : 'расход не получен'}` : `Сессия: ${number.format(tokens)} токенов`;
-  $('session-usage').title = `Вход: ${number.format(usage.input_tokens || 0)} · Выход: ${number.format(usage.output_tokens || 0)}. Включает промежуточные обращения модели.`;
-  const limits = state.status?.limits || {};
-  const limit = limits.context_tokens || limits.max_context_tokens || limits.model_context_tokens || 0;
-  $('context-usage').textContent = `Контекст${estimated ? ' ≈' : ':'} ${number.format(context || 0)}${limit ? ` / ${number.format(limit)}` : ''}`;
-  $('context-usage').title = 'Размер текущего контекста отличается от накопленного расхода токенов за весь диалог.';
-  const ratio = limit ? Math.min(100, (context / limit) * 100) : 0;
-  $('context-fill').style.width = `${ratio}%`;
-  $('context-fill').style.background = ratio > 85 ? '#bf8953' : '#8bab78';
-}
-
-function renderStatus(data) {
-  state.status = data;
-  $('model-name').textContent = data.model || 'Модель не выбрана';
-  $('connection-dot').classList.toggle('offline', !data.configured);
-  $('setup-banner').hidden = data.configured;
-  const missing = data.missing_settings || [];
-  $('setup-text').textContent = `Укажите ${missing.length ? missing.join(', ') : 'ключ API и имя модели'} в локальном файле .env и перезапустите приложение. Ключи остаются на сервере.`;
-  const resources = data.resources || [];
-  $('resource-count').textContent = resources.length;
-  $('resources-list').replaceChildren();
-  resources.forEach((resource) => {
-    const row = element('div', 'resource-item');
-    const kind = String(resource.kind || 'Ресурс');
-    row.append(
-      element('div', 'resource-kind', /ontology|meta|мета/i.test(kind) ? 'Онтология' : 'Данные'),
-      element('div', 'resource-title', resource.title || resource.id),
-      element('div', 'resource-path', resource.path || ''),
-    );
-    $('resources-list').append(row);
-  });
-  const index = data.index || {};
-  const busy = index.busy || index.refresh_running || state.refreshing;
-  const errors = Object.entries(index.errors || {});
-  if (data.configured && !index.ready) {
-    $('setup-banner').hidden = false;
-    $('setup-banner').querySelector('strong').textContent = busy ? 'Загружаем данные из IACPaaS' : 'Подготовьте источники для поиска';
-    $('setup-text').textContent = busy ? `Обновление индекса продолжается${index.current_resource ? `: ${index.current_resource}` : ''}. Состояние доступно в панели «Источники».` : 'Откройте «Источники» и нажмите «Обновить из IACPaaS». Пока загружены не все ресурсы, поиск будет неполным.';
-  } else {
-    $('setup-banner').querySelector('strong').textContent = 'Настройте модель, чтобы начать диалог';
-  }
-  $('index-badge').textContent = busy ? 'Обновляется…' : errors.length ? 'Есть ошибки' : index.ready ? 'Готов' : 'Нужна загрузка';
-  $('index-badge').classList.toggle('failed', errors.length > 0);
-  $('index-description').textContent = `${index.resources_indexed || 0} из ${index.total_resources ?? resources.length} ресурсов · ${number.format(index.nodes || 0)} вершин в индексе${busy && index.current_resource ? `\nСейчас: ${index.current_resource}` : ''}`;
-  $('index-time').textContent = index.refresh_error || (index.last_synced ? `Обновлён: ${formatDate(index.last_synced)}` : 'Первый поиск может потребовать загрузки ресурсов.');
-  $('index-errors').replaceChildren();
-  $('index-errors').hidden = errors.length === 0;
-  if (errors.length) {
-    $('index-errors').append(element('strong', '', 'Обновление неполное. Для этих ресурсов новые данные не получены:'));
-    errors.forEach(([id, message]) => {
-      const name = resources.find((resource) => resource.id === id)?.title || id;
-      $('index-errors').append(element('p', '', `${name}: ${message}`));
-    });
-    $('index-errors').append(element('span', '', 'Ранее загруженные данные могут остаться доступны. Проверьте время их загрузки в журнале инструментов.'));
-  }
-  $('refresh-index').disabled = !!busy;
-  $('refresh-index').textContent = busy ? 'Обновление источников…' : '↻ Обновить из IACPaaS';
+/** Вопрос из подсказки: вставляем в поле ввода и переходим в диалог. Отправляет пользователь. */
+function askQuestion(text) {
+  goToView('chat');
+  const input = $('message-input');
+  input.value = text;
+  resizeInput();
   updateComposer();
+  input.focus();
+  input.setSelectionRange(text.length, text.length);
 }
 
-function formatDate(value) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+/* ---------- Выезжающая панель диалогов (узкий экран) ---------- */
+
+function openSidebar() {
+  $('sidebar').classList.add('open');
+  $('scrim').hidden = false;
+  $('open-sidebar').setAttribute('aria-expanded', 'true');
+  $('main').inert = true; // пока панель открыта, фокус не уходит под неё
+  $('new-chat').focus();
+}
+
+function closeSidebar({ restoreFocus = false } = {}) {
+  if (!$('sidebar').classList.contains('open')) return;
+  $('sidebar').classList.remove('open');
+  $('scrim').hidden = true;
+  $('open-sidebar').setAttribute('aria-expanded', 'false');
+  $('main').inert = false;
+  if (restoreFocus) $('open-sidebar').focus();
+}
+
+/* ---------- Состояние сервера ---------- */
+
+function isIndexBusy(status) {
+  const index = status?.index ?? {};
+  return Boolean(index.busy || index.refresh_running);
 }
 
 async function loadStatus() {
-  try { renderStatus(await api('/api/status')); }
-  catch (error) { $('model-name').textContent = 'Нет связи с сервером'; $('connection-dot').classList.add('offline'); throw error; }
+  const wasBusy = isIndexBusy(state.status);
+  try {
+    state.status = await api('/api/status');
+  } catch (error) {
+    $('meter-model').textContent = 'нет связи с сервером';
+    throw error;
+  }
+  renderStatus();
+  // Индекс обновился — описание данных могло измениться.
+  if (wasBusy && !isIndexBusy(state.status)) loadOverview();
 }
+
+function scheduleStatusPoll() {
+  const busy = state.refreshRequested || isIndexBusy(state.status);
+  setTimeout(async () => {
+    await loadStatus().catch(() => {});
+    scheduleStatusPoll();
+  }, busy ? STATUS_POLL_BUSY_MS : STATUS_POLL_MS);
+}
+
+function renderStatus() {
+  renderMeter();
+  renderNotices();
+  updateComposer();
+  renderIndexStatus($('index-status'), state.status, { requested: state.refreshRequested, onRefresh: refreshIndex });
+}
+
+/** Узкие уведомления: модель не настроена; данные не загружены. */
+function renderNotices() {
+  const status = state.status;
+  const setup = $('setup-notice');
+  const indexNotice = $('index-notice');
+  if (!status) return;
+
+  setup.hidden = Boolean(status.configured);
+  if (!status.configured) {
+    const missing = status.missing_settings?.length ? status.missing_settings.join(', ') : 'ключ API и модель';
+    setup.replaceChildren(
+      el('strong', '', 'Модель не настроена.'),
+      ` Укажите ${missing} в файле .env и перезапустите приложение. Ключ остаётся на сервере.`,
+    );
+  }
+
+  const index = status.index ?? {};
+  // В разделе «Данные» состояние индекса и так показано подробно.
+  indexNotice.hidden = index.ready !== false || state.view === 'data';
+  if (!indexNotice.hidden) {
+    const text = isIndexBusy(status)
+      ? `Загружаем данные из IACPaaS${index.current_resource ? `: ${index.current_resource}` : ''}…`
+      : 'Данные из IACPaaS загружены не полностью — поиск будет неполным.';
+    const link = el('a', '', 'Открыть «Данные»');
+    link.href = '#data';
+    indexNotice.replaceChildren(el('span', '', text), link);
+  }
+}
+
+/** Индикатор в шапке: модель · контекст (полоса) · стоимость диалога. */
+function renderMeter() {
+  const status = state.status ?? {};
+  const info = status.model_info ?? {};
+  const model = $('meter-model');
+  model.textContent = shortModelName(info.name) || status.model || '';
+  model.title = describeModel(status);
+
+  const session = state.session;
+  const tokens = session?.context_tokens;
+  const budget = session?.context_budget || status.limits?.context_budget || info.context_window;
+  const context = $('meter-context');
+  context.hidden = !(typeof tokens === 'number' && budget > 0);
+  if (!context.hidden) {
+    const share = Math.min(1, tokens / budget);
+    // Полоса видна даже при доле меньше процента.
+    $('meter-fill').style.width = `${tokens > 0 ? Math.max(share * 100, 2) : 0}%`;
+    context.classList.toggle('is-high', share > 0.85);
+    const approx = session.context_estimated ? '≈ ' : '';
+    $('meter-context-text').replaceChildren(
+      el('span', 'meter-label', 'контекст '),
+      `${approx}${formatCompact(tokens)}`,
+      el('span', 'meter-budget', ` из ${formatCompact(budget)}`),
+    );
+    context.title = `Контекст следующего вопроса: ${approx}${formatNumber(tokens)} из ${formatNumber(budget)} токенов `
+      + `(${(share * 100).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} %).`;
+  }
+
+  const usage = session?.usage ?? {};
+  const cost = formatCost(usage.cost, usage.currency ?? info.currency);
+  const costNode = $('meter-cost');
+  costNode.hidden = !cost;
+  if (cost) {
+    costNode.replaceChildren(el('span', 'meter-label', 'диалог '), costPrefix(usage, cost) + cost);
+    costNode.title = 'Стоимость всех ответов в этом диалоге';
+  }
+}
+
+/** «DeepSeek: DeepSeek V4.1 Flash» → «DeepSeek V4.1 Flash». */
+function shortModelName(name) {
+  if (!name) return '';
+  const position = name.indexOf(': ');
+  return position > 0 ? name.slice(position + 2) : name;
+}
+
+function describeModel(status) {
+  const info = status.model_info ?? {};
+  const lines = [[status.provider, status.model].filter(Boolean).join(' · ')];
+  const prices = [info.price_input_per_million, info.price_output_per_million];
+  if (prices.every((price) => typeof price === 'number')) {
+    const [input, output] = prices.map((price) => formatCost(price, info.currency));
+    lines.push(`1 млн токенов: вход ${input}, выход ${output}`);
+  } else {
+    lines.push('Цены модели неизвестны');
+  }
+  if (info.context_window) lines.push(`Окно контекста: ${formatNumber(info.context_window)} токенов`);
+  return lines.join('\n');
+}
+
+/** «≥», если провайдер прислал расход не по всем обращениям. */
+function costPrefix(usage, cost) {
+  return usage.cost_known === false && !cost.startsWith('<') ? '≥ ' : '';
+}
+
+/* ---------- Раздел «Данные» ---------- */
+
+async function loadOverview() {
+  try {
+    state.overview = await api('/api/data/overview');
+    state.overviewError = '';
+  } catch (error) {
+    state.overview = null;
+    state.overviewError = error.message;
+  }
+  renderSuggestions();
+  renderData();
+}
+
+function renderData() {
+  renderDataView($('data-content'), {
+    overview: state.overview,
+    error: state.overviewError,
+    resources: state.status?.resources,
+    onAsk: askQuestion,
+  });
+  renderIndexStatus($('index-status'), state.status, { requested: state.refreshRequested, onRefresh: refreshIndex });
+}
+
+async function refreshIndex() {
+  if (state.refreshRequested) return;
+  state.refreshRequested = true;
+  renderStatus();
+  try {
+    await api('/api/index/refresh', { method: 'POST', body: '{}' });
+  } catch (error) {
+    showError(error);
+  } finally {
+    state.refreshRequested = false;
+    // Сразу после запуска индекс уже «busy»: следующий опрос пойдёт в ускоренном режиме.
+    await loadStatus().catch(showError);
+  }
+}
+
+/* ---------- Список диалогов ---------- */
 
 async function loadSessions() {
   const data = await api('/api/sessions');
-  state.sessions = data.sessions || [];
-  renderSessions();
+  state.sessions = data.sessions ?? [];
+  renderSessionList();
 }
 
-function renderSessions() {
+function renderSessionList() {
   const list = $('session-list');
-  list.replaceChildren();
-  if (!state.sessions.length) list.append(element('p', 'session-empty', 'Здесь появятся ваши диалоги. История хранится локально.'));
-  for (const session of state.sessions) {
-    const row = element('div', `session-row${state.session?.id === session.id ? ' active' : ''}`);
-    const select = element('button', 'session-select', session.title || 'Новый диалог');
-    select.title = session.title || 'Новый диалог';
-    select.disabled = state.streaming;
-    select.addEventListener('click', () => selectSession(session.id).catch((error) => showError(error.message)));
-    const remove = element('button', 'session-delete', '×');
-    remove.setAttribute('aria-label', `Удалить диалог «${session.title || 'Новый диалог'}»`);
-    remove.disabled = state.streaming;
-    remove.addEventListener('click', () => deleteSession(session).catch((error) => showError(error.message)));
-    row.append(select, remove);
-    list.append(row);
+  if (!state.sessions.length) {
+    list.replaceChildren(el('p', 'session-empty', 'Диалогов пока нет. История хранится локально.'));
+    return;
   }
+  list.replaceChildren(...state.sessions.map(sessionRow));
 }
 
-async function selectSession(id) {
+function sessionRow(session) {
+  const title = session.title || 'Новый диалог';
+  const active = session.id === state.session?.id;
+  const row = el('div', active ? 'session is-active' : 'session');
+
+  const open = el('button', 'session-open');
+  open.type = 'button';
+  open.title = title;
+  open.disabled = state.streaming;
+  if (active) open.setAttribute('aria-current', 'true');
+  const cost = formatCost(session.usage?.cost, session.usage?.currency);
+  const meta = [formatShortDate(session.updated_at), cost].filter(Boolean).join(' · ');
+  open.append(el('span', 'session-title', title), el('span', 'session-meta', meta));
+  open.addEventListener('click', () => openSession(session.id).catch(showError));
+
+  const remove = el('button', 'icon-button session-delete');
+  remove.type = 'button';
+  remove.title = 'Удалить диалог';
+  remove.setAttribute('aria-label', `Удалить диалог «${title}»`);
+  remove.disabled = state.streaming;
+  remove.append($('icon-delete').content.cloneNode(true));
+  remove.addEventListener('click', () => deleteSession(session).catch(showError));
+
+  row.append(open, remove);
+  return row;
+}
+
+async function openSession(id, { stayInView = false } = {}) {
   if (state.streaming) return;
   state.session = await api(`/api/sessions/${encodeURIComponent(id)}`);
-  $('chat-title').textContent = state.session.title || 'Новый диалог';
-  $('messages').replaceChildren();
-  const messages = state.session.messages || [];
-  $('welcome').hidden = messages.length > 0;
-  messages.filter((message) => message.role === 'user' || message.role === 'assistant').forEach(renderMessage);
-  updateUsage(state.session.usage, state.session.context_tokens, state.session.context_estimated ?? true);
-  renderSessions();
-  $('sidebar').classList.remove('open');
-  $('toggle-sidebar').setAttribute('aria-expanded', 'false');
-  // New chats start at the heading. Only an existing conversation should jump
-  // to its latest message; scrolling an oversized welcome screen hid its top.
-  if (messages.length) scrollToEnd(true);
+  state.session.messages ??= [];
+  renderConversation();
+  renderSessionList();
+  renderMeter();
+  if (!stayInView) goToView('chat');
+  closeSidebar();
+  // Новый диалог начинается сверху, открытый — с последнего сообщения.
+  if (state.session.messages.length) scrollToEnd(true);
   else $('conversation').scrollTop = 0;
 }
 
-async function newSession() {
+async function newSession({ stayInView = false } = {}) {
   if (state.streaming) return;
-  // Reuse a pristine session, so repeatedly clicking "new" does not create empty rows.
-  if (state.session && !(state.session.messages || []).length) {
+  if (!stayInView) goToView('chat');
+  // Пустой диалог переиспользуем, чтобы повторные нажатия не плодили пустые строки.
+  if (state.session && !state.session.messages?.length) {
+    closeSidebar();
     $('message-input').focus();
-    $('sidebar').classList.remove('open');
-    $('toggle-sidebar').setAttribute('aria-expanded', 'false');
     return;
   }
-  const session = await api('/api/sessions', { method: 'POST', body: '{}' });
+  const created = await api('/api/sessions', { method: 'POST', body: '{}' });
   await loadSessions();
-  await selectSession(session.id);
-  $('message-input').focus();
+  await openSession(created.id, { stayInView });
+  if (!stayInView) $('message-input').focus();
 }
 
 async function deleteSession(session) {
-  if (!window.confirm(`Удалить диалог «${session.title || 'Новый диалог'}» и его историю?`)) return;
-  await api(`/api/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
-  await loadSessions();
+  const title = session.title || 'Новый диалог';
+  if (!window.confirm(`Удалить диалог «${title}» вместе с историей?`)) return;
+  try {
+    await api(`/api/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
+  } finally {
+    await loadSessions(); // даже при ошибке: список мог устареть (диалог уже удалён в другой вкладке)
+  }
   if (state.session?.id === session.id) {
     state.session = null;
-    if (state.sessions.length) await selectSession(state.sessions[0].id);
+    if (state.sessions.length) await openSession(state.sessions[0].id, { stayInView: true });
     else await newSession();
   }
 }
 
-/* Minimal inline Markdown uses DOM nodes only. No model output is inserted as HTML. */
-function renderAnswer(target, text) {
-  target.replaceChildren();
-  const pattern = /(\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|\*\*[^*]+\*\*|`[^`\n]+`)/g;
-  let offset = 0;
-  for (const match of text.matchAll(pattern)) {
-    target.append(document.createTextNode(text.slice(offset, match.index)));
-    const token = match[0];
-    if (token.startsWith('[')) {
-      const link = token.match(/^\[([^\]]+)\]\((.+)\)$/);
-      const anchor = element('a', '', link[1]);
-      anchor.href = link[2];
-      anchor.target = '_blank';
-      anchor.rel = 'noopener noreferrer';
-      target.append(anchor);
-    } else if (token.startsWith('**')) target.append(element('strong', '', token.slice(2, -2)));
-    else target.append(element('code', '', token.slice(1, -1)));
-    offset = match.index + token.length;
+/* ---------- Диалог как документ ---------- */
+
+function renderConversation() {
+  const session = state.session;
+  const messages = (session?.messages ?? []).filter((m) => m.role === 'user' || m.role === 'assistant');
+  $('chat-heading').textContent = session?.title ? `Диалог: ${session.title}` : 'Новый диалог';
+  $('messages').replaceChildren();
+  let turn = null;
+  for (const message of messages) {
+    if (message.role === 'user' || !turn) turn = appendTurn(message.role === 'user' ? message.content : null);
+    if (message.role === 'assistant') showSavedAnswer(createAnswerView(turn), message);
   }
-  target.append(document.createTextNode(text.slice(offset)));
+  $('intro').hidden = messages.length > 0;
 }
 
-function normalizeTrace(trace) {
-  const byId = new Map();
-  for (const item of trace || []) {
-    const data = item.data || item;
-    const id = data.id || data.tool_call_id || `tool-${byId.size}`;
-    byId.set(id, { ...byId.get(id), ...data, id });
-  }
-  return [...byId.values()];
+function renderSuggestions() {
+  const questions = state.overview?.suggested_questions?.length
+    ? state.overview.suggested_questions.slice(0, 4)
+    : DEFAULT_SUGGESTIONS;
+  $('suggestions').replaceChildren(...questions.map((question) => {
+    const item = el('li');
+    const button = el('button', 'suggestion', question);
+    button.type = 'button';
+    button.addEventListener('click', () => askQuestion(question));
+    item.append(button);
+    return item;
+  }));
 }
 
-function renderMessage(message) {
-  const row = element('article', `message ${message.role}`);
-  const body = element('div', 'message-body');
-  const trace = element('details', 'tool-trace');
-  const traceSummary = element('summary', '', 'Вызовы инструментов');
-  const traceBody = element('div');
-  const tools = new Map();
-  trace.append(traceSummary, traceBody);
-  trace.hidden = true;
-  if (message.role === 'assistant') {
-    const label = element('div', 'message-label');
-    label.append(element('span', 'assistant-mark', 'М'), document.createTextNode('Ассистент'));
-    row.append(label, trace);
-    renderAnswer(body, message.content || '');
-  } else body.textContent = message.content || '';
-  row.append(body);
-  const status = element('div', 'working-status');
+/** Ход диалога: вопрос (выделенный абзац), под ним — журнал и ответ. */
+function appendTurn(question) {
+  const turn = el('article', 'turn');
+  if (question !== null) turn.append(el('p', 'question', question));
+  $('messages').append(turn);
+  return turn;
+}
+
+function createAnswerView(turn) {
+  const root = el('div', 'answer');
+  const log = el('div', 'tool-log');
+  log.setAttribute('role', 'group');
+  log.setAttribute('aria-label', 'Обращения к данным');
+  const status = el('p', 'turn-status');
   status.hidden = true;
-  const statusText = element('span');
-  status.append(element('span', 'pulse'), statusText);
-  row.append(status);
-  const meta = element('div', 'message-meta');
-  row.append(meta);
-  const view = { row, body, trace, traceSummary, traceBody, tools, status, statusText, meta, content: message.content || '' };
-  normalizeTrace(message.trace).forEach((tool) => renderTool(view, tool));
-  if (message.role === 'assistant' && message.content) renderMessageMeta(view, message.usage);
-  $('messages').append(row);
-  return view;
+  const body = el('div', 'answer-body prose');
+  const errors = el('div', 'answer-errors');
+  const meta = el('div', 'answer-meta');
+  root.append(log, status, body, errors, meta);
+  turn.append(root);
+  return {
+    root, status, body, errors, meta,
+    tools: new ToolLog(log),
+    content: '',
+    usage: null,
+    grounded: null,
+    truncated: false,
+    done: false,
+    renderQueued: false,
+  };
 }
 
-function pretty(value) {
-  if (value === undefined) return 'Нет данных';
-  if (typeof value === 'string') return value;
-  return JSON.stringify(value, null, 2);
+function showSavedAnswer(view, message) {
+  view.content = message.content ?? '';
+  view.usage = message.usage ?? null;
+  view.grounded = message.grounded ?? null;
+  normalizeTrace(message.trace).forEach((call) => view.tools.update(call));
+  renderMarkdown(view.body, view.content);
+  // Остановка или сбой хода хранятся отдельно от текста ответа (поле error).
+  if (message.error?.message) addAnswerError(view, message.error.message, message.error.code === 'cancelled');
+  renderAnswerMeta(view);
 }
 
-function renderTool(view, update) {
-  const id = update.id || `tool-${view.tools.size}`;
-  const tool = { ...(view.tools.get(id)?.data || {}), ...update, id };
-  let entry = view.tools.get(id);
-  if (!entry) {
-    entry = { node: element('div', 'tool-item'), data: tool };
-    view.tools.set(id, entry);
-    view.traceBody.append(entry.node);
+/** Тихая строка под ответом: токены · стоимость · «без обращения к базе» · Копировать. */
+function renderAnswerMeta(view) {
+  const usage = view.usage ?? {};
+  const parts = [];
+  if (usage.total_tokens) {
+    const tokens = el('span', '', `${usage.known === false ? '≥ ' : ''}${plural(usage.total_tokens, ['токен', 'токена', 'токенов'])}`);
+    tokens.title = `Вход ${formatNumber(usage.input_tokens ?? 0)}, выход ${formatNumber(usage.output_tokens ?? 0)}`
+      + (usage.requests ? `; обращений к модели: ${usage.requests}` : '');
+    parts.push(tokens);
   }
-  entry.data = tool;
-  entry.node.replaceChildren();
-  const title = element('div', 'tool-title');
-  const hasResult = Object.prototype.hasOwnProperty.call(tool, 'result');
-  const complete = hasResult || tool.duration_ms !== undefined;
-  title.append(element('span', '', tool.is_error ? '!' : complete ? '✓' : '◌'), element('span', 'tool-name', tool.name || 'Инструмент'));
-  const milliseconds = Number.isFinite(tool.duration_ms) ? `${number.format(Math.round(tool.duration_ms))} мс` : '';
-  title.append(element('span', `tool-state${tool.is_error ? ' failed' : ''}`, complete ? `${tool.is_error ? 'Ошибка' : 'Готово'}${milliseconds ? ` · ${milliseconds}` : ''}` : 'Выполняется…'));
-  entry.node.append(title);
-  if (hasResult) renderToolSources(entry.node, tool.result);
-  if (tool.arguments !== undefined) {
-    const args = element('details');
-    const code = element('pre', '', pretty(tool.arguments));
-    code.tabIndex = 0;
-    args.append(element('summary', '', 'Аргументы'), code);
-    entry.node.append(args);
-  }
-  if (hasResult) {
-    const result = element('details');
-    const code = element('pre', '', pretty(tool.result));
-    code.tabIndex = 0;
-    result.append(element('summary', '', tool.is_error ? 'Подробности ошибки' : 'Полный результат · JSON'), code);
-    entry.node.append(result);
-  }
-  view.trace.hidden = false;
-  const pending = [...view.tools.values()].some((item) => !Object.prototype.hasOwnProperty.call(item.data, 'result') && item.data.duration_ms === undefined);
-  view.traceSummary.textContent = `${pending ? 'Поиск в источниках…' : 'Вызовы инструментов'} · ${view.tools.size}`;
+  // Нулевую стоимость без токенов (ответ остановлен до обращения к модели) не показываем.
+  const cost = usage.total_tokens || usage.cost > 0 ? formatCost(usage.cost, usage.currency) : '';
+  if (cost) parts.push(el('span', '', costPrefix(usage, cost) + cost));
+  if (view.grounded === false) parts.push(el('span', '', 'без обращения к базе'));
+  if (view.truncated) parts.push(el('span', '', 'ответ обрезан по лимиту длины'));
+  if (view.content) parts.push(copyButton(view));
+  view.meta.replaceChildren(...parts);
 }
 
-function renderToolSources(target, result) {
-  // The raw response remains available below; these visible labels explain
-  // whether a result came from a local snapshot and when it was indexed.
-  if (!result || typeof result !== 'object') return;
-  const meta = result.meta || {};
-  let sources = meta.sources || (meta.resource_id ? [meta] : []);
-  if (!sources.length && result.data?.resources) {
-    sources = result.data.resources.map((resource) => ({
-      resource_title: resource.title,
-      indexed_at: resource.indexed_at,
-      served_from: resource.indexed ? 'local_index' : 'not_indexed',
-    }));
-  }
-  if (sources.length) {
-    const block = element('div', 'tool-sources');
-    sources.forEach((source) => {
-      const row = element('div', 'tool-source');
-      const name = source.resource_title || source.resource_id || source.source || 'IACPaaS';
-      row.append(element('strong', '', name));
-      const date = element('span', '', source.indexed_at ? `IACPaaS · локальный индекс · ${formatDate(source.indexed_at)}` : 'IACPaaS · ресурс ещё не загружен в индекс');
-      date.title = source.indexed_at || 'Время загрузки отсутствует';
-      row.append(date);
-      if (source.last_sync_error) row.append(element('span', 'source-warning', `Последнее обновление не удалось: ${source.last_sync_error}`));
-      block.append(row);
-    });
-    target.append(block);
-  }
-  const data = result.data || {};
-  if (data.coverage_complete === false) target.append(element('div', 'tool-warning', 'Поиск выполнен не по всем ресурсам: часть источников не загружена. Полный список — в результате.'));
-  if (meta.result_size_limited || data.truncated || data.has_more) target.append(element('div', 'tool-note', 'Показана ограниченная выборка. В результате есть данные для продолжения поиска.'));
+function copyButton(view) {
+  const button = el('button', 'link-button', 'Копировать');
+  button.type = 'button';
+  button.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(view.content);
+      button.textContent = 'Скопировано';
+    } catch {
+      button.textContent = 'Не удалось скопировать';
+    }
+    setTimeout(() => { button.textContent = 'Копировать'; }, 2000);
+  });
+  return button;
 }
 
-function renderMessageMeta(view, usage = {}) {
-  view.meta.replaceChildren();
-  const total = usage?.total_tokens || 0;
-  if (total) {
-    const label = element('span', '', `Вход ${number.format(usage.input_tokens || 0)} · Выход ${number.format(usage.output_tokens || 0)} · Всего ${number.format(total)} токенов`);
-    label.title = 'Суммарно по всем обращениям модели в этом ответе, включая вызовы инструментов.';
-    view.meta.append(label);
-  }
-  if (usage?.known === false) view.meta.append(element('span', '', 'Часть расхода токенов не получена от провайдера'));
-  if (view.content) {
-    const copy = element('button', 'copy-button', 'Копировать');
-    copy.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(view.content); copy.textContent = 'Скопировано'; }
-      catch { copy.textContent = 'Не удалось скопировать'; }
-      setTimeout(() => { copy.textContent = 'Копировать'; }, 2000);
-    });
-    view.meta.append(copy);
-  }
+function setTurnStatus(view, text) {
+  view.status.hidden = !text;
+  view.status.textContent = text ?? '';
+}
+
+function addAnswerError(view, text, quiet = false) {
+  view.errors.append(el('p', quiet ? 'answer-error is-quiet' : 'answer-error', text));
+}
+
+/** Во время потока перерисовываем Markdown не чаще раза за кадр. */
+function queueAnswerRender(view) {
+  if (view.renderQueued) return;
+  view.renderQueued = true;
+  requestAnimationFrame(() => {
+    view.renderQueued = false;
+    const follow = isNearBottom();
+    renderMarkdown(view.body, view.content);
+    if (follow) scrollToEnd(true);
+  });
+}
+
+function isNearBottom() {
+  const pane = $('conversation');
+  return pane.scrollHeight - pane.scrollTop - pane.clientHeight < 160;
 }
 
 function scrollToEnd(force = false) {
   const pane = $('conversation');
-  if (force || pane.scrollHeight - pane.scrollTop - pane.clientHeight < 180) pane.scrollTop = pane.scrollHeight;
+  if (force || isNearBottom()) pane.scrollTop = pane.scrollHeight;
 }
 
-function setWorking(view, text) {
-  view.status.hidden = !text;
-  view.statusText.textContent = text;
-}
+/* ---------- Отправка вопроса и поток ответа ---------- */
 
-/* Fetch supports POST + streamed SSE; EventSource supports only GET. */
-async function readEvents(response, onEvent) {
-  if (!response.body) throw new Error('Браузер не поддерживает потоковый ответ.');
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  function consume() {
-    buffer = buffer.replace(/\r\n/g, '\n');
-    let boundary;
-    while ((boundary = buffer.indexOf('\n\n')) >= 0) {
-      const block = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      let event = 'message';
-      const data = [];
-      for (const line of block.split('\n')) {
-        if (line.startsWith('event:')) event = line.slice(6).trim();
-        if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
-      }
-      if (data.length) onEvent(event, JSON.parse(data.join('\n')));
-    }
-  }
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      consume();
-    }
-    buffer += decoder.decode();
-    if (buffer.trim()) { buffer += '\n\n'; consume(); }
-  } finally { reader.releaseLock(); }
-}
-
-async function submitMessage(event) {
-  event.preventDefault();
-  const text = $('message-input').value.trim();
+async function sendMessage(text) {
   if (!text || state.streaming || !state.status?.configured) return;
   if (!state.session) await newSession();
-  const sessionId = state.session.id;
+  const session = state.session;
+
   state.streaming = true;
   state.controller = new AbortController();
-  $('error-banner').hidden = true;
-  $('welcome').hidden = true;
-  const userMessage = { role: 'user', content: text };
-  state.session.messages.push(userMessage);
-  renderMessage(userMessage);
-  const view = renderMessage({ role: 'assistant', content: '' });
-  view.trace.open = true;
-  setWorking(view, 'Ассистент изучает запрос…');
+  hideError();
+  $('intro').hidden = true;
+  session.messages.push({ role: 'user', content: text });
+  const view = createAnswerView(appendTurn(text));
+  view.root.setAttribute('aria-busy', 'true');
+  setTurnStatus(view, 'Изучает вопрос…');
   $('message-input').value = '';
   resizeInput();
   updateComposer();
-  renderSessions();
+  renderSessionList();
   scrollToEnd(true);
-  let turnUsage = {};
-  let finished = false;
+
   try {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
-      signal: state.controller.signal,
+    await streamChat(session.id, text, state.controller.signal, (event, data) => {
+      const follow = isNearBottom();
+      handleStreamEvent(view, event, data);
+      if (follow) scrollToEnd(true);
     });
-    if (!response.ok) {
-      let detail = `Ошибка запроса: ${response.status}`;
-      try { detail = (await response.json()).detail || detail; } catch { /* Keep status code. */ }
-      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
-    }
-    await readEvents(response, (name, data) => {
-      switch (name) {
-        case 'status': setWorking(view, data.message || 'Обработка запроса…'); break;
-        case 'tool_start':
-          renderTool(view, data);
-          setWorking(view, `Вызов ${data.name}…`);
-          break;
-        case 'tool_end':
-          renderTool(view, data);
-          setWorking(view, 'Ассистент обрабатывает найденные данные…');
-          break;
-        case 'answer_delta':
-          setWorking(view, 'Формируется ответ…');
-          view.content += data.text || '';
-          renderAnswer(view.body, view.content);
-          break;
-        case 'usage':
-          turnUsage = data.turn || {};
-          state.session.usage = data.session || {};
-          state.session.context_tokens = data.context_tokens || 0;
-          updateUsage(data.session, data.context_tokens, data.context_estimated);
-          renderMessageMeta(view, turnUsage);
-          break;
-        case 'session':
-          state.session.title = data.title || state.session.title;
-          $('chat-title').textContent = state.session.title;
-          break;
-        case 'error':
-          view.row.append(element('div', 'message-error', data.message || 'Не удалось завершить запрос.'));
-          break;
-        case 'done': finished = true; break;
-        default: break;
-      }
-      scrollToEnd();
-    });
-    if (!finished) view.row.append(element('div', 'message-error', 'Поток завершился до подтверждения ответа. Проверьте соединение и повторите запрос.'));
+    if (!view.done) addAnswerError(view, 'Поток оборвался до конца ответа. Проверьте соединение и повторите вопрос.');
   } catch (error) {
-    view.row.append(element('div', 'message-error', error.name === 'AbortError' ? 'Генерация остановлена. Уже выполненные обращения могут учитываться провайдером.' : error.message));
-  } finally {
-    setWorking(view, '');
-    // A disconnected stream may end while a tool is still pending. Never leave
-    // an apparently running tool spinning after the turn has already stopped.
-    for (const entry of [...view.tools.values()]) {
-      if (!Object.prototype.hasOwnProperty.call(entry.data, 'result') && entry.data.duration_ms === undefined) {
-        renderTool(view, { ...entry.data, is_error: true, result: { error: 'Вызов прерван; результат не получен.' } });
-      }
+    if (error.name === 'AbortError') {
+      addAnswerError(view, 'Ответ остановлен. Уже выполненные обращения к модели могут быть оплачены.', true);
+    } else {
+      addAnswerError(view, error.message);
+      if (error.status === 503) loadStatus().catch(() => {});
     }
+  } finally {
+    finishAnswer(view);
     state.streaming = false;
     state.controller = null;
-    renderMessageMeta(view, turnUsage);
-    state.session.messages.push({ role: 'assistant', content: view.content, trace: [...view.tools.values()].map((item) => item.data), usage: turnUsage });
     updateComposer();
-    loadSessions().then(async () => {
-      // Stop disconnects SSE before the final usage event. Read the saved
-      // counters once more, so the session total does not stay stale.
-      if (state.session?.id === sessionId && !state.streaming) {
-        const saved = await api(`/api/sessions/${encodeURIComponent(sessionId)}`);
-        if (state.session?.id === sessionId && !state.streaming) {
-          updateUsage(saved.usage, saved.context_tokens, saved.context_estimated);
-        }
-      }
-    }).catch((error) => showError(error.message));
-    loadStatus().catch(() => {});
+    renderSessionList();
+    syncAfterTurn(session.id, view);
     $('message-input').focus();
-    scrollToEnd();
   }
+}
+
+function handleStreamEvent(view, event, data) {
+  switch (event) {
+    case 'session':
+      updateSessionTitle(data.title);
+      break;
+    case 'status':
+      setTurnStatus(view, data.message || 'Работает…');
+      break;
+    case 'tool_start':
+      view.tools.update(data);
+      setTurnStatus(view, toolActivity(data.name));
+      break;
+    case 'tool_end':
+      view.tools.update(data);
+      setTurnStatus(view, 'Разбирает найденное…');
+      break;
+    case 'answer_delta':
+      setTurnStatus(view, '');
+      view.content += data.text ?? '';
+      queueAnswerRender(view);
+      break;
+    case 'answer_meta':
+      view.grounded = data.grounded ?? null;
+      view.truncated = Boolean(data.truncated);
+      break;
+    case 'usage':
+      view.usage = data.turn ?? null;
+      Object.assign(state.session, {
+        usage: data.session ?? state.session.usage,
+        context_tokens: data.context_tokens ?? state.session.context_tokens,
+        context_budget: data.context_budget ?? state.session.context_budget,
+        context_estimated: data.context_estimated ?? state.session.context_estimated,
+      });
+      renderMeter();
+      break;
+    case 'error':
+      addAnswerError(view, data.message || 'Не удалось завершить ответ.');
+      break;
+    case 'done':
+      view.done = true;
+      break;
+    default:
+      break; // незнакомые события пропускаем: так старый интерфейс переживёт новые поля сервера
+  }
+}
+
+function finishAnswer(view) {
+  view.tools.interruptPending();
+  setTurnStatus(view, '');
+  renderMarkdown(view.body, view.content);
+  view.root.removeAttribute('aria-busy');
+  renderAnswerMeta(view);
+  state.session?.messages.push({
+    role: 'assistant', content: view.content, trace: view.tools.calls(), usage: view.usage ?? {}, grounded: view.grounded,
+  });
+  scrollToEnd();
+}
+
+function updateSessionTitle(title) {
+  if (!title || !state.session) return;
+  state.session.title = title;
+  $('chat-heading').textContent = `Диалог: ${title}`;
+  const summary = state.sessions.find((item) => item.id === state.session.id);
+  if (summary) summary.title = title;
+  renderSessionList();
+}
+
+/** После ответа берём итоги с сервера: после «Стоп» событие usage не приходит. */
+async function syncAfterTurn(sessionId, view) {
+  try {
+    await loadSessions();
+    if (state.session?.id !== sessionId || state.streaming) return;
+    const saved = await api(`/api/sessions/${encodeURIComponent(sessionId)}`);
+    if (state.session?.id !== sessionId || state.streaming) return;
+    state.session = { ...saved, messages: saved.messages ?? [] };
+    renderMeter();
+    if (!view.usage) {
+      const last = state.session.messages.at(-1);
+      if (last?.role === 'assistant' && last.usage) {
+        view.usage = last.usage;
+        renderAnswerMeta(view);
+      }
+    }
+  } catch (error) {
+    showError(error);
+  }
+}
+
+/* ---------- Поле ввода ---------- */
+
+function updateComposer() {
+  const hasText = Boolean($('message-input').value.trim());
+  $('send-button').hidden = state.streaming;
+  $('stop-button').hidden = !state.streaming;
+  $('send-button').disabled = !hasText || !state.status?.configured;
+  $('new-chat').disabled = state.streaming;
 }
 
 function resizeInput() {
   const input = $('message-input');
   input.style.height = 'auto';
-  input.style.height = `${Math.min(180, input.scrollHeight)}px`;
+  input.style.height = `${Math.min(200, input.scrollHeight)}px`;
+  // Полоса прокрутки нужна, только когда текст выше максимальной высоты поля.
+  input.style.overflowY = input.scrollHeight > 200 ? 'auto' : 'hidden';
 }
 
-async function refreshIndex() {
-  if (state.refreshing) return;
-  state.refreshing = true;
-  if (state.status) renderStatus(state.status);
-  try {
-    await api('/api/index/refresh', { method: 'POST', body: '{}' });
-  } catch (error) { showError(error.message); }
-  finally {
-    state.refreshing = false;
-    await loadStatus().catch((error) => showError(error.message));
-  }
-}
+/* ---------- События ---------- */
 
-$('chat-form').addEventListener('submit', (event) => submitMessage(event).catch((error) => showError(error.message)));
-$('message-input').addEventListener('input', () => { resizeInput(); updateComposer(); });
-$('message-input').addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+function bindEvents() {
+  $('chat-form').addEventListener('submit', (event) => {
     event.preventDefault();
-    $('chat-form').requestSubmit();
-  }
-});
-$('stop-button').addEventListener('click', () => state.controller?.abort());
-$('new-chat').addEventListener('click', () => newSession().catch((error) => showError(error.message)));
-$('open-resources').addEventListener('click', () => { $('resources-panel').hidden = false; $('open-resources').setAttribute('aria-expanded', 'true'); $('close-resources').focus(); });
-$('close-resources').addEventListener('click', () => { $('resources-panel').hidden = true; $('open-resources').setAttribute('aria-expanded', 'false'); $('open-resources').focus(); });
-$('toggle-sidebar').addEventListener('click', () => { const open = $('sidebar').classList.toggle('open'); $('toggle-sidebar').setAttribute('aria-expanded', String(open)); });
-$('dismiss-error').addEventListener('click', () => { $('error-banner').hidden = true; });
-$('refresh-index').addEventListener('click', refreshIndex);
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') {
-    if (!$('resources-panel').hidden) { $('resources-panel').hidden = true; $('open-resources').setAttribute('aria-expanded', 'false'); $('open-resources').focus(); }
-    if ($('sidebar').classList.contains('open')) { $('sidebar').classList.remove('open'); $('toggle-sidebar').setAttribute('aria-expanded', 'false'); $('toggle-sidebar').focus(); }
-  }
-});
-document.querySelectorAll('[data-prompt]').forEach((button) => button.addEventListener('click', () => {
-  $('message-input').value = button.dataset.prompt;
-  resizeInput();
-  updateComposer();
-  $('message-input').focus();
-}));
+    sendMessage($('message-input').value.trim()).catch(showError);
+  });
+  $('message-input').addEventListener('input', () => {
+    resizeInput();
+    updateComposer();
+  });
+  $('message-input').addEventListener('keydown', (event) => {
+    // Enter — отправить, Shift+Enter — новая строка; во время набора через IME не отправляем.
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      $('chat-form').requestSubmit();
+    }
+  });
+  $('stop-button').addEventListener('click', () => state.controller?.abort());
+  $('new-chat').addEventListener('click', () => newSession().catch(showError));
+  $('dismiss-error').addEventListener('click', hideError);
 
-(async function initialize() {
+  $('open-sidebar').addEventListener('click', openSidebar);
+  $('close-sidebar').addEventListener('click', () => closeSidebar({ restoreFocus: true }));
+  $('scrim').addEventListener('click', () => closeSidebar({ restoreFocus: true }));
+  NARROW_SCREEN.addEventListener('change', () => closeSidebar());
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeSidebar({ restoreFocus: true });
+  });
+  window.addEventListener('hashchange', () => showView(viewFromHash()));
+  window.addEventListener('popstate', () => showView(viewFromHash()));
+}
+
+async function initialize() {
+  bindEvents();
+  showView(viewFromHash());
+  renderSuggestions();
+  renderData();
+  loadOverview(); // не ждём: подсказки и раздел «Данные» дорисуются, когда придёт ответ
   try {
     await Promise.all([loadStatus(), loadSessions()]);
-    if (state.sessions.length) await selectSession(state.sessions[0].id);
-    else await newSession();
-  } catch (error) { showError(`Не удалось загрузить приложение: ${error.message}`); }
-  // Only lightweight status is polled; the corpus is never reloaded by polling.
-  setInterval(() => loadStatus().catch(() => {}), 12000);
-})();
+    if (state.sessions.length) await openSession(state.sessions[0].id, { stayInView: true });
+    else await newSession({ stayInView: true });
+    if (state.view === 'data') renderData(); // список ресурсов для запасного варианта появился вместе со статусом
+  } catch (error) {
+    showError(`Не удалось загрузить приложение: ${error.message}`);
+  }
+  scheduleStatusPoll();
+}
+
+initialize();

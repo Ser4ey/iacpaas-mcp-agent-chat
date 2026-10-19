@@ -216,18 +216,19 @@ def create_app(settings=None) -> FastAPI:
                     error = describe_error(failure)
                 finally:
                     result = runner.result
-                    suffix = "Ответ остановлен пользователем." if cancelled else error["message"] if error else ""
+                    problem = {"message": "Ответ остановлен пользователем.", "code": "cancelled"} if cancelled else error
                     content = result.content
-                    if suffix:
-                        content += ("\n\n" if content else "") + suffix
+                    if problem:
+                        # Модель в следующем ходе должна знать, что этот ход прервался.
                         # В историю модели попадают только завершённые группы инструментов.
-                        result.model_messages.append({"role": "assistant", "content": content})
-                    if not content:
+                        result.model_messages.append({"role": "assistant", "content":
+                                                      content + ("\n\n" if content else "") + f"[{problem['message']}]"})
+                    elif not content:
                         content = "Модель не вернула ответ. Попробуйте уточнить запрос."
                         result.model_messages.append({"role": "assistant", "content": content})
                     grounded = any(not item.get("is_error") for item in result.trace)
-                    message_id = store.save_turn(session_id, text, content, result.trace,
-                                                 result.usage, result.model_messages, grounded)
+                    message_id = store.save_turn(session_id, text, content, result.trace, result.usage,
+                                                 result.model_messages, grounded, problem)
                 if error:
                     yield sse("error", error)
                 updated = store.get(session_id)

@@ -1,11 +1,1235 @@
-/* A small local interface: no fonts, icons, or scripts are fetched from a CDN. */
-:root{font-family:"Segoe UI",Arial,sans-serif;color:#243b35;background:#fbfcfa;font-size:14px;--green:#226b53;--muted:#7a8880;--line:#e2e8e1;--sidebar:#f1f4ee;--light:#f6f8f3}
-*{box-sizing:border-box}body{margin:0}button,textarea{font:inherit}button,a,textarea{outline-offset:4px}button{cursor:pointer}button:disabled{cursor:default;opacity:.45}button{color:inherit}button[hidden],[hidden]{display:none!important}a{color:var(--green)}.app-shell{height:100dvh;display:flex;overflow:hidden}.sidebar{width:264px;flex-shrink:0;background:var(--sidebar);border-right:1px solid var(--line);padding:29px 19px 18px;display:flex;flex-direction:column}.brand{display:flex;gap:11px;align-items:center;text-decoration:none;color:#263f34;font-size:19px;font-weight:650;letter-spacing:-.5px}.brand-mark{width:36px;height:39px;border-radius:10px;background:var(--green);color:#fff;display:grid;place-items:center;font-family:Georgia,serif;font-size:25px}.brand small{display:block;font-size:10px;font-weight:400;letter-spacing:0;color:#718074;margin-top:4px}.new-chat{border:1px solid #ccd8c9;background:#fff9;border-radius:8px;width:100%;text-align:left;padding:12px 14px;margin:32px 0 29px;font-weight:550}.new-chat span{font-size:21px;margin-right:12px;font-weight:400}.sidebar-label{color:#8a958b;font-size:10px;font-weight:600;letter-spacing:1.5px;margin:0 11px 12px}.session-list{overflow:auto;flex:1}.session-row{display:flex;align-items:center;border-radius:7px;margin:4px 0;min-width:0}.session-row.active{background:#e0e8dc}.session-select{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;border:0;background:none;padding:12px 11px;font-size:12px}.session-delete{background:none;border:0;opacity:0;padding:9px;color:#8c958d}.session-row:hover .session-delete,.session-delete:focus{opacity:1}.session-empty{font-size:12px;color:var(--muted);padding:12px;line-height:1.6}.sidebar-bottom{display:flex;align-items:center;gap:9px;border-top:1px solid #dce3d8;padding:18px 5px 0;margin-top:15px}.sidebar-bottom strong{font-size:11px;font-weight:550}.sidebar-bottom small{display:block;font-size:10px;color:var(--muted);margin-top:3px}.connection-dot,.small-dot{width:6px;height:6px;display:inline-block;border-radius:50%;background:#5c9479;flex-shrink:0}.connection-dot.offline{background:#c49964}.local-label{margin-left:auto;color:#879480;font-size:8px;letter-spacing:1px;border:1px solid #d5ddcf;border-radius:4px;padding:3px 4px}.workspace{min-width:0;flex:1;display:flex;flex-direction:column;position:relative}.topbar{height:88px;flex-shrink:0;border-bottom:1px solid #edf0e9;display:flex;align-items:center;justify-content:space-between;padding:0 40px}.page-heading{display:flex;align-items:center;gap:12px}.page-heading h1{font-size:14px;font-weight:550;margin:0 0 7px;max-width:min(50vw,600px);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.model-label{display:flex;align-items:center;gap:6px;color:#8a958a;font-size:10px}.model-label .small-dot{width:5px;height:5px}.resources-button{background:#fff;border:1px solid #dde5d9;border-radius:7px;padding:9px 11px;font-size:11px;display:flex;gap:8px;align-items:center}.resources-button>span:first-child{font-size:15px}.count{background:#edf2e9;border-radius:4px;min-width:18px;text-align:center;padding:2px 4px;font-size:9px}.conversation{flex:1;overflow-y:auto;scroll-behavior:smooth;scrollbar-width:thin}.welcome{max-width:850px;margin:clamp(48px,10vh,110px) auto 30px;padding:0 44px}.welcome-kicker{display:flex;align-items:center;gap:8px;font-size:9px;letter-spacing:2px;font-weight:600;color:#69876b}.welcome-kicker span{height:5px;width:5px;border-radius:50%;background:#729168}.welcome h2{font-family:Georgia,"Times New Roman",serif;font-size:clamp(34px,3.2vw,48px);font-weight:400;line-height:1.16;letter-spacing:-1.6px;margin:20px 0;color:#294b3a}.welcome>p{font-size:13px;line-height:1.85;color:#7c897f;max-width:500px;margin-bottom:29px}.suggestions{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.suggestions button{position:relative;text-align:left;min-height:151px;padding:19px 16px 21px;border:1px solid #dde5d6;border-radius:10px;background:linear-gradient(140deg,#fff,#f7f9f3);transition:border-color .2s,transform .2s}.suggestions button:hover{border-color:#96b59b;transform:translateY(-2px)}.suggestion-icon{display:block;font-size:20px;color:#6e8e6b;margin-bottom:13px}.suggestions strong{display:block;font-size:11px;font-weight:600;margin-bottom:8px}.suggestions button>span:not(.suggestion-icon){display:block;color:#8c9788;font-size:10px;line-height:1.65;max-width:150px}.suggestions b{position:absolute;right:13px;top:15px;font-weight:400;font-size:15px;color:#a3b29c}.welcome-note{display:flex;gap:7px;align-items:center;margin-top:25px;color:#93a08e;font-size:10px}.welcome-note>span{font-size:13px}.composer-area{flex-shrink:0;padding:15px 40px 22px;max-width:1060px;width:100%;align-self:center}.session-meter{display:flex;gap:14px;align-items:center;color:#8c988a;font-size:9px;margin:0 3px 9px}.context-track{height:3px;width:68px;background:#e6ebdf;border-radius:3px;overflow:hidden;margin-left:-7px}.context-track span{display:block;height:100%;width:0;background:#8bab78;transition:width .3s}.composer{display:flex;align-items:flex-end;gap:12px;background:#fff;border:1px solid #d8e1d0;border-radius:12px;padding:14px 13px 13px 18px;box-shadow:0 3px 12px #2d422505}.composer:focus-within{border-color:#93b28b}.composer textarea{flex:1;min-width:0;resize:none;border:0;background:none;outline:none;line-height:1.6;padding:2px 0;max-height:180px;color:#344d3b;font-size:12px}.composer textarea::placeholder{color:#a2ad9b}.send-button{width:32px;height:32px;border:0;border-radius:8px;background:var(--green);color:#fff;font-size:21px;flex-shrink:0}.stop-button{background:#eef3e8;border:1px solid #cddbc3;border-radius:7px;height:32px;padding:0 10px;font-size:11px}.stop-button span{font-size:9px;margin-right:4px}.composer-note{display:flex;justify-content:space-between;gap:15px;font-size:9px;color:#a4ae9d;margin:10px 4px 0}.keyboard-hint{white-space:nowrap}.keyboard-hint span{margin:0 5px}.messages{max-width:850px;margin:0 auto;padding:30px 44px 20px}.message{margin-bottom:30px;line-height:1.7;font-size:13px}.message.user{display:flex;flex-direction:column;align-items:flex-end}.message.user .message-body{background:#eef2e8;border:1px solid #e3e9da;padding:12px 17px;border-radius:13px 13px 3px 13px;max-width:90%}.message-label{display:flex;gap:8px;align-items:center;font-size:10px;font-weight:600;letter-spacing:.3px;margin-bottom:9px;color:#73866e}.assistant-mark{display:inline-grid;place-items:center;background:#e8f0e1;color:var(--green);border:1px solid #dbe5d3;width:23px;height:23px;border-radius:7px;font-family:Georgia,serif;font-size:15px}.message-body{white-space:pre-wrap;overflow-wrap:anywhere}.message-body a{overflow-wrap:anywhere}.message-body:empty{display:none}.message-meta{display:flex;align-items:center;gap:10px;font-size:9px;color:#98a18f;margin-top:12px}.copy-button{border:0;background:none;color:#8b9983;font-size:9px;padding:0}.tool-trace{border:1px solid #e0e7d8;border-radius:9px;background:#f6f8f1;margin:0 0 15px;overflow:hidden;font-size:11px}.tool-trace>summary{padding:10px 13px;cursor:pointer;color:#708669;user-select:none}.tool-item{margin:0 12px;padding:11px 0;border-top:1px solid #e3e9db}.tool-title{display:flex;gap:8px;align-items:center;font-size:11px;font-weight:550}.tool-name{overflow-wrap:anywhere}.tool-state{font-size:9px;color:#78906c;margin-left:auto;white-space:nowrap}.tool-state.failed{color:#ad6354}.tool-item details{margin-top:8px}.tool-item details summary{cursor:pointer;color:#8b9980;font-size:10px}.tool-item pre{font-family:Consolas,monospace;font-size:10px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;background:#fff9;border:1px solid #e5ebdf;padding:10px;border-radius:5px}.working-status{font-size:11px;color:#88987d;display:flex;gap:8px;align-items:center;margin:9px 0}.pulse{height:5px;width:5px;border-radius:50%;background:#79a566;animation:pulse 1.3s infinite}@keyframes pulse{50%{opacity:.3}}.message-error{background:#faf0ea;border:1px solid #eadacf;border-radius:7px;padding:10px 13px;color:#9e6954;font-size:11px;margin-top:10px}.setup-banner,.error-banner{margin:16px 40px 0;border-radius:8px;padding:12px 15px;font-size:11px;line-height:1.7;flex-shrink:0}.setup-banner{background:#f7f1df;border:1px solid #e8dfbc;color:#82734a}.setup-banner strong{display:block;font-weight:600}.setup-banner span{display:block}.error-banner{display:flex;justify-content:space-between;gap:15px;background:#fcf1eb;border:1px solid #efdbce;color:#a06449}.error-banner button{background:none;border:0;color:inherit;font-size:18px}.icon-button{background:none;border:0;font-size:23px;line-height:1;padding:5px;color:#87977b}.mobile-menu{display:none;font-size:19px}.resources-panel{width:360px;flex-shrink:0;border-left:1px solid var(--line);background:#f7f9f3;padding:28px 23px;overflow:auto}.panel-heading{display:flex;justify-content:space-between;align-items:flex-start}.eyebrow{font-size:9px;letter-spacing:1.7px;color:#8a9a7d}.panel-heading h2{font-size:17px;font-family:Georgia,serif;font-weight:400;margin:10px 0 0}.panel-intro,.panel-footnote{color:#8c9784;font-size:11px;line-height:1.8;margin:22px 0}.index-card{border:1px solid #dce5d1;background:#fff;border-radius:9px;padding:15px;margin-bottom:24px}.index-heading{display:flex;justify-content:space-between;gap:10px}.index-heading strong{font-size:11px;font-weight:600}.index-heading>span{color:#77916b;font-size:9px}.index-card p{color:#8b9882;font-size:10px;line-height:1.7}.index-card small{font-size:9px;color:#a3ac9b;display:block}.index-card button{border:1px solid #d6e1ca;border-radius:6px;background:#f4f7ef;padding:8px 10px;font-size:10px;margin-top:14px;width:100%}.resource-item{padding:15px 0;border-bottom:1px solid #e1e8d9}.resource-kind{font-size:8px;color:#97a28e;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px}.resource-title{font-size:12px;line-height:1.5;color:#48643c;font-weight:550}.resource-path{font-size:9px;color:#9ca692;overflow-wrap:anywhere;margin-top:7px;line-height:1.5}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-.index-card p{white-space:pre-line}.index-heading>span.failed{color:#a06443}.index-errors{border-top:1px solid #eee2d5;margin-top:12px;padding-top:12px;color:#9a6a49;font-size:10px;line-height:1.6}.index-errors strong{font-weight:550}.index-errors p{color:#9a6a49;margin:8px 0}.index-errors>span{font-size:9px}.tool-sources{margin:8px 0;padding-left:13px;border-left:2px solid #dbe5cf}.tool-source{margin:7px 0;font-size:9px;line-height:1.6}.tool-source strong{display:block;color:#748767;font-weight:550}.tool-source>span{display:block;color:#93a087}.tool-source>span.source-warning,.tool-warning{color:#a17245}.tool-warning,.tool-note{font-size:10px;line-height:1.7;padding:7px 9px;margin-top:9px;border-radius:5px;background:#f2eadc}.tool-note{background:#eaf0e3;color:#81906f}.tool-item pre:focus-visible{outline:2px solid #97ad83}
-/* Empty chat content must not add invisible space below the welcome screen. */
-.messages:empty{display:none}
-@media(prefers-reduced-motion:reduce){.conversation{scroll-behavior:auto}.pulse{animation:none}.suggestions button,.context-track span{transition:none}}
-@media(min-width:1600px){.welcome{margin-top:14vh}}@media(max-width:1200px){.resources-panel{position:absolute;right:0;top:0;bottom:0;z-index:20;box-shadow:-15px 0 40px #283b2514}.sidebar{width:230px}.topbar{padding:0 28px}.composer-area{padding-left:28px;padding-right:28px}.welcome,.messages{padding-left:30px;padding-right:30px}.suggestions{gap:9px}.suggestions button{padding:17px 13px}.keyboard-hint{display:none}}@media(max-width:760px){.sidebar{display:none;position:absolute;left:0;top:0;bottom:0;z-index:30;box-shadow:15px 0 40px #283b2520;width:264px}.sidebar.open{display:flex}.mobile-menu{display:block}.topbar{height:74px;padding:0 18px}.page-heading h1{font-size:12px;max-width:43vw}.model-label{font-size:8px}.resources-button{font-size:10px;padding:8px}.welcome{margin-top:47px;padding:0 24px}.welcome h2{font-size:36px}.welcome>p{font-size:12px}.suggestions{grid-template-columns:1fr}.suggestions button{min-height:90px;padding:15px 37px 15px 51px}.suggestion-icon{position:absolute;left:18px;top:20px;margin:0}.suggestions button>span:not(.suggestion-icon){max-width:none}.welcome-note{margin-top:18px;line-height:1.6}.composer-area{padding:12px 16px 15px}.composer-note{font-size:8px}.session-meter{font-size:8px;gap:11px}.messages{padding:25px 20px}.message{font-size:12px}.setup-banner,.error-banner{margin:12px 16px 0}.resources-panel{width:min(360px,100%)}.session-delete{opacity:.8}.welcome-kicker{font-size:8px}.icon-button{min-width:36px;min-height:36px}.session-delete{min-width:36px;min-height:36px}}
-/* Short windows have less room after the header, setup notice and composer. */
-@media(max-height:820px){.welcome{margin-top:24px;margin-bottom:22px}.welcome h2{margin-top:14px;margin-bottom:14px}.welcome>p{margin-bottom:20px}.welcome-note{margin-top:18px}.suggestions button{min-height:126px}}
-@media(max-height:820px) and (max-width:760px){.suggestions button{min-height:86px}}
+/*
+ * Материалы · IACPaaS — стили интерфейса.
+ *
+ * Принципы: минимализм через типографику и воздух; нейтральная палитра и один
+ * сдержанный акцент; без теней, градиентов и «карточек» — только тонкие линии.
+ * Только системные шрифты, ничего не загружается извне.
+ */
+
+/* ========== Переменные: цвета, шрифты, размеры ========== */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #fbfbfa;            /* фон страницы */
+  --bg-input: #ffffff;      /* поле ввода */
+  --bg-hover: #f0f0ee;      /* наведение на строку */
+  --bg-active: #ebebe8;     /* выбранный диалог */
+  --bg-code: #f2f2f0;       /* код в ответе */
+  --text: #1b1b1a;          /* основной текст */
+  --text-2: #565653;        /* второстепенный */
+  --text-3: #8b8b87;        /* тихий: подписи, метаданные */
+  --line: #e8e8e5;          /* разделители */
+  --line-strong: #d4d4d0;   /* рамки полей и кнопок */
+  --accent: #2f5bd3;        /* единственный акцент: ссылки, фокус, полоса контекста */
+  --danger: #b3261e;
+  --warning: #9a6200;
+  --scrim: rgb(0 0 0 / 0.28);
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", Menlo, monospace;
+
+  --column: 42rem;          /* ширина колонки чтения ≈ 70–75 знаков */
+  --sidebar: 16rem;
+  --gutter: 24px;
+}
+
+/* Тёмная тема — по настройке системы. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141414;
+    --bg-input: #1a1a1a;
+    --bg-hover: #1f1f1f;
+    --bg-active: #252525;
+    --bg-code: #1e1e1e;
+    --text: #e7e7e4;
+    --text-2: #a9a9a5;
+    --text-3: #75756f;
+    --line: #262626;
+    --line-strong: #383838;
+    --accent: #8ea8f2;
+    --danger: #f0897d;
+    --warning: #d9b25b;
+    --scrim: rgb(0 0 0 / 0.55);
+  }
+}
+
+/* ========== Основа ========== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+button,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+/* Все иконки — тонкие линии в цвет текста. */
+svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Видимый фокус для клавиатуры. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ========== Кнопки ========== */
+
+/* Текстовая кнопка, выглядит как тихая ссылка. */
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font-size: inherit;
+}
+
+.link-button:hover {
+  color: var(--text);
+}
+
+.link-button.accent {
+  color: var(--accent);
+}
+
+.link-button.accent:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Обычная кнопка с тонкой рамкой. */
+.button {
+  padding: 6px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: none;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.button:hover:not(:disabled) {
+  border-color: var(--text-3);
+}
+
+.button:disabled {
+  color: var(--text-3);
+}
+
+/* Квадратная кнопка с иконкой. */
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-3);
+}
+
+.icon-button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* ========== Каркас: боковая панель + основная область ========== */
+
+.app {
+  display: flex;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.view {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.scroll {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+/* Колонка чтения по центру. */
+.column {
+  width: min(100% - 2 * var(--gutter), var(--column));
+  margin-inline: auto;
+}
+
+/* ========== Боковая панель: список диалогов ========== */
+
+.sidebar {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: var(--sidebar);
+  padding: 0 12px 12px;
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 52px;
+  padding: 0 8px;
+}
+
+.wordmark {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-decoration: none;
+}
+
+.wordmark span {
+  margin-left: 4px;
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+.sidebar-close {
+  display: none;
+}
+
+.new-chat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 16px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-2);
+  font-size: 14px;
+  text-align: left;
+}
+
+.new-chat:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.new-chat:disabled {
+  color: var(--text-3);
+}
+
+.session-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.session {
+  display: flex;
+  align-items: center;
+  border-radius: 6px;
+}
+
+.session:hover,
+.session:focus-within {
+  background: var(--bg-hover);
+}
+
+.session.is-active {
+  background: var(--bg-active);
+}
+
+.session-open {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  padding: 7px 4px 7px 8px;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  text-align: left;
+}
+
+.session.is-active .session-open {
+  color: var(--text);
+}
+
+.session-title {
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-meta {
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-meta:empty {
+  display: none;
+}
+
+/* Удаление появляется при наведении; на сенсорных экранах видно всегда. */
+.session-delete {
+  width: 28px;
+  height: 28px;
+  margin-right: 4px;
+  opacity: 0;
+}
+
+.session:hover .session-delete,
+.session:focus-within .session-delete {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .session-delete {
+    opacity: 1;
+  }
+}
+
+.session-empty {
+  margin: 0;
+  padding: 0 8px;
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.scrim {
+  display: none;
+}
+
+/* ========== Шапка: разделы и индикатор ========== */
+
+.topbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 16px;
+  height: 52px;
+  padding: 0 var(--gutter);
+  border-bottom: 1px solid var(--line);
+}
+
+.menu-button {
+  display: none;
+}
+
+.views {
+  display: flex;
+  gap: 22px;
+  align-self: stretch;
+}
+
+/* Активный раздел подчёркнут линией, совпадающей с нижней границей шапки. */
+.views a {
+  display: flex;
+  align-items: center;
+  margin-bottom: -1px;
+  border-bottom: 1px solid transparent;
+  color: var(--text-3);
+  font-size: 14px;
+  text-decoration: none;
+}
+
+.views a:hover {
+  color: var(--text);
+}
+
+.views a[aria-current="page"] {
+  border-bottom-color: var(--text);
+  color: var(--text);
+}
+
+/* Индикатор: модель · контекст · стоимость диалога. */
+.meter {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.meter-model {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.meter-context {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.meter-bar {
+  width: 56px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.meter-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.meter-context.is-high .meter-bar span {
+  background: var(--warning);
+}
+
+.meter-cost {
+  color: var(--text-2);
+}
+
+/* ========== Уведомления ========== */
+
+.notice {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  padding: 10px var(--gutter);
+  border-bottom: 1px solid var(--line);
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.notice strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.notice-error {
+  color: var(--danger);
+}
+
+.notice-error .link-button {
+  margin-left: auto;
+}
+
+/* ========== Пустой диалог ========== */
+
+.intro {
+  padding: 14vh 0 40px;
+}
+
+.intro-text {
+  max-width: 32em;
+  margin: 0 0 32px;
+  font-size: 18px;
+  line-height: 1.5;
+}
+
+.intro-label {
+  margin: 0 0 4px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.suggestions {
+  margin: 0 0 24px;
+  padding: 0;
+  list-style: none;
+}
+
+.suggestions li {
+  border-bottom: 1px solid var(--line);
+}
+
+.suggestion {
+  width: 100%;
+  padding: 11px 0;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  text-align: left;
+}
+
+.suggestion:hover {
+  color: var(--text);
+}
+
+.intro-more {
+  margin: 0;
+  font-size: 13px;
+}
+
+/* ========== Ход диалога: вопрос, журнал, ответ ========== */
+
+.messages {
+  padding-bottom: 32px;
+}
+
+.turn {
+  padding: 32px 0 28px;
+}
+
+/* Тонкая линия между ходами. */
+.turn + .turn {
+  border-top: 1px solid var(--line);
+}
+
+/* Вопрос пользователя — выделенный абзац, а не облачко. */
+.question {
+  margin: 0 0 14px;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.answer-body {
+  font-size: 16px;
+  line-height: 1.65;
+}
+
+.answer-body:empty {
+  display: none;
+}
+
+/* Что агент делает прямо сейчас («Ищет в базе…»). */
+.turn-status {
+  margin: 0 0 12px;
+  color: var(--text-3);
+  font-size: 13px;
+  animation: breathe 1.6s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.answer-error {
+  margin: 12px 0 0;
+  color: var(--danger);
+  font-size: 14px;
+}
+
+.answer-error.is-quiet {
+  color: var(--text-3);
+}
+
+/* Тихая строка метаданных под ответом. */
+.answer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  margin-top: 16px;
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.answer-meta:empty {
+  display: none;
+}
+
+.answer-meta > * + *::before {
+  content: "·";
+  margin: 0 0.6em;
+  color: var(--text-3);
+}
+
+/* ========== Журнал инструментов ========== */
+
+.tool-log {
+  margin: 0 0 18px;
+}
+
+.tool-log:empty {
+  display: none;
+}
+
+.tool {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* Строка: уголок · имя (колонка постоянной ширины) · аргументы · итог сразу за ними. */
+.tool > summary {
+  display: grid;
+  grid-template-columns: 8px 18ch minmax(0, max-content) 1fr;
+  align-items: baseline;
+  gap: 12px;
+  padding: 2px 0;
+  list-style: none;
+  cursor: pointer;
+}
+
+.tool > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Маленький уголок, поворачивается при раскрытии. */
+.tool > summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-right: 1px solid var(--text-3);
+  border-bottom: 1px solid var(--text-3);
+  transform: translateY(-2px) rotate(-45deg);
+  transition: transform 0.15s;
+}
+
+.tool[open] > summary::before {
+  transform: translateY(-3px) rotate(45deg);
+}
+
+.tool > summary:hover .tool-name {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.tool-name {
+  color: var(--text);
+}
+
+.tool-args {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Итог может переноситься (длинный текст ошибки), аргументы при этом остаются видны. */
+.tool-facts {
+  color: var(--text-3);
+}
+
+/* Разделитель между аргументами и итогом. */
+.tool-args:not(:empty) + .tool-facts:not(:empty)::before {
+  content: "·";
+  margin-right: 0.6em;
+}
+
+.tool-facts > * + *::before {
+  content: "·";
+  margin-right: 0.6em;
+}
+
+/* Переносится только текст ошибки; «34 мс» или «индекс — платформа недоступна» не разрываются. */
+.tool-facts > :not(.tool-error-text) {
+  white-space: nowrap;
+}
+
+.tool.is-error .tool-flag {
+  color: var(--danger);
+}
+
+.tool.is-pending .tool-facts {
+  animation: breathe 1.6s ease-in-out infinite;
+}
+
+.tool-details {
+  margin: 4px 0 12px 18px;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+}
+
+.tool-label {
+  margin: 8px 0 2px;
+  color: var(--text-3);
+  font-family: var(--font-sans);
+  font-size: 11px;
+}
+
+.tool-details pre {
+  max-height: 320px;
+  margin: 0;
+  overflow: auto;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+/* ========== Текст ответа (Markdown) ========== */
+
+.prose > :first-child {
+  margin-top: 0;
+}
+
+.prose > :last-child {
+  margin-bottom: 0;
+}
+
+.prose p,
+.prose ul,
+.prose ol,
+.prose pre,
+.prose blockquote,
+.prose .table-wrap {
+  margin: 0 0 0.9em;
+}
+
+.prose h3,
+.prose h4,
+.prose h5 {
+  margin: 1.5em 0 0.5em;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.prose h3 {
+  font-size: 1.15rem;
+}
+
+.prose h4 {
+  font-size: 1.02rem;
+}
+
+.prose h5 {
+  color: var(--text-2);
+  font-size: 0.95rem;
+}
+
+.prose ul,
+.prose ol {
+  padding-left: 1.4em;
+}
+
+.prose li {
+  margin: 0.2em 0;
+}
+
+.prose li > ul,
+.prose li > ol {
+  margin: 0.2em 0 0;
+}
+
+.prose li::marker {
+  color: var(--text-3);
+}
+
+.prose strong {
+  font-weight: 600;
+}
+
+.prose code {
+  padding: 0.1em 0.25em;
+  border-radius: 4px;
+  background: var(--bg-code);
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+}
+
+.prose pre {
+  padding: 12px 14px;
+  overflow-x: auto;
+  border-radius: 6px;
+  background: var(--bg-code);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.prose pre code {
+  padding: 0;
+  background: none;
+  font-size: inherit;
+}
+
+.prose blockquote {
+  margin-left: 0;
+  padding-left: 14px;
+  border-left: 2px solid var(--line-strong);
+  color: var(--text-2);
+}
+
+.prose hr {
+  margin: 1.6em 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.prose table {
+  border-collapse: collapse;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.prose th,
+.prose td {
+  padding: 5px 24px 5px 0;
+  line-height: 1.45;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.prose th {
+  border-bottom-color: var(--line-strong);
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* ========== Поле ввода ========== */
+
+/* Тот же запас под полосу прокрутки, что и у ленты, — иначе поле ввода смещено относительно текста. */
+.composer-area {
+  flex: none;
+  padding: 8px 0 14px;
+  overflow: hidden;
+  scrollbar-gutter: stable;
+}
+
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 7px 7px 7px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--bg-input);
+}
+
+.composer:focus-within {
+  border-color: var(--text-3);
+}
+
+.composer textarea {
+  flex: 1;
+  max-height: 200px;
+  overflow-y: hidden;
+  padding: 5px 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-size: 15px;
+  line-height: 1.5;
+  resize: none;
+}
+
+.composer textarea::placeholder {
+  color: var(--text-3);
+}
+
+.send-button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--text);
+  color: var(--bg);
+}
+
+.send-button:disabled {
+  background: var(--bg-active);
+  color: var(--text-3);
+}
+
+.stop-button {
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: none;
+  font-size: 13px;
+}
+
+.stop-button:hover {
+  border-color: var(--text-3);
+}
+
+.composer-hint {
+  margin-top: 6px;
+  margin-bottom: 0;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+/* ========== Раздел «Данные» ========== */
+
+#data-content {
+  padding: 40px 0 96px;
+}
+
+.data-title {
+  margin: 0 0 12px;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.lead {
+  margin: 0 0 32px;
+  color: var(--text-2);
+  font-size: 16px;
+  line-height: 1.65;
+}
+
+/* Сводные цифры: значение крупно, подпись мелко. */
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px 44px;
+  margin: 0 0 32px;
+}
+
+.stats div {
+  display: flex;
+  flex-direction: column-reverse;
+}
+
+.stats dt {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.stats dd {
+  margin: 0;
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.index-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 24px;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.index-status:empty {
+  display: none;
+}
+
+.index-summary {
+  margin: 0;
+}
+
+/* Факты не разрываются посередине («8 из 8 ресурсов»). */
+.index-summary > * {
+  white-space: nowrap;
+}
+
+.index-summary strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.index-summary > * + *::before {
+  content: "·";
+  margin: 0 0.6em;
+  color: var(--text-3);
+}
+
+.index-line {
+  margin: 4px 0 0;
+  color: var(--text-3);
+}
+
+.index-line.is-error {
+  color: var(--danger);
+}
+
+.data-note {
+  margin: 24px 0 0;
+  color: var(--text-2);
+}
+
+/* Подзаголовок группы: «С чего начать», «Базы и справочники», «Онтологии». */
+.data-group {
+  margin: 56px 0 4px;
+  color: var(--text-3);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.data-group + .suggestions {
+  margin-top: 8px;
+}
+
+.resource {
+  padding: 24px 0 28px;
+  border-bottom: 1px solid var(--line);
+}
+
+.resource:last-child {
+  border-bottom: 0;
+}
+
+.resource h3 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.resource-description {
+  margin: 0 0 12px;
+  color: var(--text-2);
+  line-height: 1.6;
+}
+
+/* Цифры ресурса строкой: «Вершин 93 593   Марок ≈ 1 670». */
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 24px;
+  margin: 0 0 16px;
+  font-size: 13px;
+}
+
+.facts div {
+  display: flex;
+  gap: 6px;
+}
+
+.facts dt {
+  color: var(--text-3);
+}
+
+.facts dd {
+  margin: 0;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Дерево разделов с отточием до числа, как в оглавлении книги. */
+.tree {
+  max-width: 34rem;
+  margin: 0 0 16px;
+  padding: 0;
+  font-size: 14px;
+  list-style: none;
+}
+
+.tree-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.tree-leader {
+  flex: 1;
+  min-width: 24px;
+  border-bottom: 1px dotted var(--line-strong);
+}
+
+.tree-count {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tree .tree {
+  margin: 0 0 4px;
+  padding-left: 16px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.tree .tree .tree-row {
+  padding: 1px 0;
+}
+
+.resource-line,
+.resource-source {
+  margin: 8px 0 0;
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+/* ========== Узкий экран: панель диалогов выезжает слева ========== */
+
+@media (max-width: 820px) {
+  :root {
+    --gutter: 16px;
+  }
+
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 20;
+    width: min(85vw, 300px);
+    border-right: 1px solid var(--line);
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform 0.2s ease, visibility 0s linear 0.2s;
+  }
+
+  .sidebar.open {
+    transform: none;
+    visibility: visible;
+    transition: transform 0.2s ease;
+  }
+
+  .sidebar-close,
+  .menu-button {
+    display: inline-grid;
+  }
+
+  .menu-button {
+    margin-left: -8px;
+  }
+
+  .scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    background: var(--scrim);
+  }
+
+  .topbar {
+    gap: 12px;
+  }
+
+  .views {
+    gap: 18px;
+  }
+
+  /* В шапке остаются полоса контекста и стоимость. */
+  .meter {
+    gap: 12px;
+  }
+
+  .meter-model,
+  .meter-label,
+  .meter-budget {
+    display: none;
+  }
+
+  .meter-bar {
+    width: 36px;
+  }
+
+  .composer-hint {
+    display: none;
+  }
+
+  .intro {
+    padding-top: 8vh;
+  }
+
+  .intro-text {
+    font-size: 17px;
+  }
+
+  /* Итог вызова переносится под имя инструмента. */
+  .tool > summary {
+    grid-template-columns: 8px auto minmax(0, 1fr);
+    row-gap: 0;
+  }
+
+  .tool-facts {
+    grid-column: 2 / -1;
+  }
+
+  .tool-args:not(:empty) + .tool-facts:not(:empty)::before {
+    content: none;
+  }
+
+  #data-content {
+    padding-top: 28px;
+  }
+
+  .stats {
+    gap: 12px 28px;
+  }
+
+  .stats dd {
+    font-size: 20px;
+  }
+}
+
+/* Без анимаций для тех, кто их отключил. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

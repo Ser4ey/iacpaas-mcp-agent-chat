@@ -3,59 +3,101 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <title>Материалы · IACPaaS</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/styles.css">
-  <script src="/static/app.js" defer></script>
+  <!-- Всё локально: ни шрифтов, ни скриптов с внешних адресов. -->
+  <script type="module" src="/static/app.js"></script>
 </head>
 <body>
-  <div class="app-shell">
-    <aside class="sidebar" id="sidebar" aria-label="Диалоги">
-      <a class="brand" href="/" aria-label="Материалы — главная"><span class="brand-mark" aria-hidden="true">М</span><span>Материалы<small>Исследовательский ассистент</small></span></a>
-      <button class="new-chat" id="new-chat"><span aria-hidden="true">＋</span> Новый диалог</button>
-      <div class="sidebar-label">ВАШИ ДИАЛОГИ</div>
-      <nav class="session-list" id="session-list" aria-label="История диалогов"></nav>
-      <div class="sidebar-bottom"><span class="connection-dot" id="connection-dot"></span><div><strong>Локальный проект</strong><small>IACPaaS → MCP → агент</small></div><span class="local-label">LOCAL</span></div>
-    </aside>
+  <div class="app">
 
-    <main class="workspace">
+    <!-- Список диалогов. На узком экране — выезжающая панель. -->
+    <aside class="sidebar" id="sidebar" aria-label="Диалоги">
+      <div class="sidebar-head">
+        <a class="wordmark" href="#chat">Материалы <span>IACPaaS</span></a>
+        <button class="icon-button sidebar-close" id="close-sidebar" type="button" aria-label="Закрыть список диалогов">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </div>
+      <button class="new-chat" id="new-chat" type="button">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
+        Новый диалог
+      </button>
+      <nav class="session-list" id="session-list" aria-label="История диалогов"></nav>
+    </aside>
+    <div class="scrim" id="scrim" hidden></div>
+
+    <main class="main" id="main">
       <header class="topbar">
-        <div class="page-heading"><button class="icon-button mobile-menu" id="toggle-sidebar" aria-label="Открыть список диалогов" aria-controls="sidebar" aria-expanded="false">☰</button><div><h1 id="chat-title">Новый диалог</h1><div class="model-label"><span class="small-dot"></span><span id="model-name">Подключение…</span></div></div></div>
-        <button class="resources-button" id="open-resources" aria-controls="resources-panel" aria-expanded="false"><span aria-hidden="true">▧</span> Источники <span class="count" id="resource-count">0</span></button>
+        <button class="icon-button menu-button" id="open-sidebar" type="button"
+                aria-label="Открыть список диалогов" aria-controls="sidebar" aria-expanded="false">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg>
+        </button>
+        <nav class="views" aria-label="Разделы">
+          <a href="#chat" id="nav-chat">Диалоги</a>
+          <a href="#data" id="nav-data">Данные</a>
+        </nav>
+        <!-- Индикатор: модель, заполнение контекста, стоимость диалога. -->
+        <div class="meter" id="meter">
+          <span class="meter-model" id="meter-model"></span>
+          <span class="meter-context" id="meter-context" hidden>
+            <span class="meter-bar" aria-hidden="true"><span id="meter-fill"></span></span>
+            <span id="meter-context-text"></span>
+          </span>
+          <span class="meter-cost" id="meter-cost" hidden></span>
+        </div>
       </header>
 
-      <div class="setup-banner" id="setup-banner" hidden role="status"><strong>Настройте модель, чтобы начать диалог</strong><span id="setup-text"></span></div>
-      <div class="error-banner" id="error-banner" hidden role="alert"><span id="error-text"></span><button id="dismiss-error" aria-label="Закрыть уведомление">×</button></div>
+      <!-- Уведомления появляются только когда действительно нужны. -->
+      <div class="notice" id="setup-notice" role="status" hidden></div>
+      <div class="notice" id="index-notice" role="status" hidden></div>
+      <div class="notice notice-error" id="error-notice" role="alert" hidden>
+        <span id="error-text"></span>
+        <button class="link-button" id="dismiss-error" type="button">Закрыть</button>
+      </div>
 
-      <section class="conversation" id="conversation" aria-label="Переписка">
-        <div class="welcome" id="welcome">
-          <div class="welcome-kicker"><span></span> ЗНАНИЯ ИЗ IACPaaS</div>
-          <h2>От вопроса —<br>к данным о материалах.</h2>
-          <p>Изучайте материалы, их свойства и связи. Ассистент ищет в подключённой базе и показывает, откуда берёт ответ.</p>
-          <div class="suggestions">
-            <button data-prompt="Какие классы свойств материалов есть в базе?"><span class="suggestion-icon">◈</span><strong>Изучить структуру</strong><span>Какие классы свойств есть в базе?</span><b aria-hidden="true">↗</b></button>
-            <button data-prompt="Найди в справочнике материалы, связанные с алюминием. Покажи источники."><span class="suggestion-icon">⌕</span><strong>Найти материал</strong><span>Что есть в справочнике об алюминии?</span><b aria-hidden="true">↗</b></button>
-            <button data-prompt="Какие характеристики и единицы измерения описаны в подключённых ресурсах?"><span class="suggestion-icon">≋</span><strong>Посмотреть характеристики</strong><span>Какие величины и единицы доступны?</span><b aria-hidden="true">↗</b></button>
+      <!-- Раздел «Диалоги» -->
+      <section class="view" id="view-chat" aria-labelledby="chat-heading">
+        <div class="scroll" id="conversation">
+          <div class="column">
+            <h1 class="visually-hidden" id="chat-heading">Диалог</h1>
+            <div class="intro" id="intro" hidden>
+              <p class="intro-text">Ассистент ищет ответы в базе материалов IACPaaS: марки сплавов, химический состав, свойства и единицы измерения.</p>
+              <p class="intro-label">Например</p>
+              <ul class="suggestions" id="suggestions"></ul>
+              <p class="intro-more"><a href="#data">Какие данные доступны</a></p>
+            </div>
+            <div class="messages" id="messages" aria-live="polite" aria-relevant="additions"></div>
           </div>
-          <div class="welcome-note"><span aria-hidden="true">ⓘ</span> Если сведений нет, ассистент сообщит об этом.</div>
         </div>
-        <div class="messages" id="messages" aria-live="polite" aria-relevant="additions"></div>
+        <footer class="composer-area">
+          <form class="composer column" id="chat-form">
+            <label class="visually-hidden" for="message-input">Вопрос ассистенту</label>
+            <textarea id="message-input" rows="1" maxlength="12000"
+                      placeholder="Спросите о материале или свойстве"></textarea>
+            <button class="send-button" id="send-button" type="submit" aria-label="Отправить" disabled>
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5"/></svg>
+            </button>
+            <button class="stop-button" id="stop-button" type="button" hidden>Стоп</button>
+          </form>
+          <p class="composer-hint column">Enter — отправить, Shift+Enter — новая строка</p>
+        </footer>
       </section>
 
-      <footer class="composer-area">
-        <div class="session-meter"><span id="session-usage">Сессия: 0 токенов</span><span id="context-usage">Контекст: 0</span><span class="context-track" aria-hidden="true"><span id="context-fill"></span></span></div>
-        <form class="composer" id="chat-form"><label class="sr-only" for="message-input">Сообщение ассистенту</label><textarea id="message-input" rows="1" placeholder="Спросите о материалах и их свойствах…" maxlength="12000"></textarea><button class="send-button" id="send-button" type="submit" aria-label="Отправить сообщение" disabled>↑</button><button class="stop-button" id="stop-button" type="button" hidden><span aria-hidden="true">■</span> Стоп</button></form>
-        <div class="composer-note"><span>Ответы по подключённым источникам · проверяйте выводы по ссылкам</span><span class="keyboard-hint">Enter — отправить <span>·</span> Shift + Enter — новая строка</span></div>
-      </footer>
+      <!-- Раздел «Данные»: содержимое строит data-view.js -->
+      <section class="view" id="view-data" aria-label="Данные" hidden>
+        <div class="scroll">
+          <div class="column" id="data-content"></div>
+        </div>
+      </section>
     </main>
-
-    <aside class="resources-panel" id="resources-panel" hidden aria-label="Подключённые источники">
-      <div class="panel-heading"><div><div class="eyebrow">БАЗА ЗНАНИЙ</div><h2>Подключённые источники</h2></div><button class="icon-button" id="close-resources" aria-label="Закрыть источники">×</button></div>
-      <p class="panel-intro">Область работы ассистента ограничена этими ресурсами. Поиск использует локальный индекс данных IACPaaS.</p>
-      <div class="index-card" role="status"><div class="index-heading"><strong id="index-heading">Индекс поиска</strong><span id="index-badge">Проверка</span></div><p id="index-description">Получаем состояние…</p><small id="index-time"></small><div id="index-errors" class="index-errors" hidden></div><button id="refresh-index">↻ Обновить из IACPaaS</button></div>
-      <div id="resources-list" class="resources-list"></div>
-      <p class="panel-footnote">В модель передаются найденные фрагменты, а не весь справочник. Вызовы инструментов видны в каждом ответе.</p>
-    </aside>
   </div>
+
+  <!-- Иконка удаления для строк списка диалогов (клонируется из JS). -->
+  <template id="icon-delete">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+  </template>
 </body>
 </html>
