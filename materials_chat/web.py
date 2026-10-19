@@ -1,9 +1,13 @@
-"""Local FastAPI chat API. SSE exposes tool execution, never hidden reasoning."""
+"""Local FastAPI chat API. SSE exposes tool execution, never hidden reasoning.
+
+Контракт эндпоинтов и событий описан в docs/http-api.md.
+"""
 from __future__ import annotations
 
 import asyncio
 import inspect
 import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,9 +16,15 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .agent import Agent
-from .openrouter import ProviderError
+from .agent import Agent, context_budget
+from .openrouter import ProviderError, fetch_model_info
 from .sessions import SessionStore
+
+log = logging.getLogger(__name__)
+
+UNKNOWN_MODEL = {"name": None, "context_window": None, "price_input_per_million": None,
+                 "price_output_per_million": None, "price_cache_read_per_million": None,
+                 "currency": None, "source": "unknown"}
 
 
 class ChatRequest(BaseModel):
@@ -29,44 +39,83 @@ def sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def leaf_exception(error: BaseException) -> BaseException:
+    """anyio (внутри MCP SDK) заворачивает ошибки в ExceptionGroup; пользователю нужна исходная."""
+    while isinstance(error, BaseExceptionGroup) and error.exceptions:
+        error = error.exceptions[0]
+    return error
+
+
+def describe_error(error: BaseException) -> dict:
+    if isinstance(error, ProviderError):
+        return {"message": str(error), "code": error.code}
+    log.error("Ошибка при ответе агента", exc_info=error)
+    return {"message": f"Внутренняя ошибка агента ({type(error).__name__}). Подробности — в окне сервера.",
+            "code": "agent_error"}
+
+
 def create_app(settings=None) -> FastAPI:
     if settings is None:
         from .config import get_settings
         settings = get_settings()
     from .service import GraphService
 
-    store = SessionStore(getattr(settings, "history_path", ".data/history.sqlite3"))
+    store = SessionStore(getattr(settings, "history_path", ".data/history.sqlite3"),
+                         getattr(settings, "history_full_turns", 2), getattr(settings, "history_tool_chars", 1500))
     graph = GraphService(settings)
     locks: dict[str, asyncio.Lock] = {}
     refresh_task = None
     refresh_error = None
     refresh_result = None
+    model_task = None
+    overview_cache: dict = {}
+
+    async def load_model_info():
+        info = await fetch_model_info(settings)
+        app.state.model_info = store.model_info = info
+        return info
+
+    async def current_model_info() -> dict:
+        """Каталог модели грузится при старте; первый вопрос дождётся его не дольше 20 с."""
+        if model_task and not model_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(model_task), 20)
+            except (asyncio.TimeoutError, Exception):
+                pass
+        return app.state.model_info
 
     @asynccontextmanager
     async def lifespan(app):
+        nonlocal model_task
+        model_task = asyncio.create_task(load_model_info())
         if getattr(settings, "auto_sync_on_start", True):
             current_index = await resolved(graph.status())
             if not current_index.get("ready", False):
                 await refresh_index()
         yield
-        if refresh_task and not refresh_task.done():
-            refresh_task.cancel()
-            try:
-                await refresh_task
-            except asyncio.CancelledError:
-                pass
+        for task in (refresh_task, model_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
         store.close()
 
     app = FastAPI(title="Материалы · IACPaaS", lifespan=lifespan)
     # These attributes make the small app easy to test without paid model calls.
     app.state.settings, app.state.store, app.state.graph = settings, store, graph
     app.state.agent_factory = Agent
+    app.state.model_info = dict(UNKNOWN_MODEL)
 
     def existing(session_id):
         session = store.get(session_id)
         if session is None:
             raise HTTPException(404, "Диалог не найден.")
         return session
+
+    def budget() -> int:
+        return context_budget(settings, app.state.model_info)
 
     @app.get("/api/status")
     async def status():
@@ -80,11 +129,28 @@ def create_app(settings=None) -> FastAPI:
                  "refresh_error": refresh_error, "refresh_result": refresh_result}
         return {"configured": not missing, "model": getattr(settings, "openrouter_model", ""),
                 "provider": getattr(settings, "provider_name", "API модели"),
+                "model_info": app.state.model_info,
                 "missing_settings": missing, "mcp_transport": getattr(settings, "mcp_transport", "http"),
                 "resources": await resolved(graph.resources()), "index": index,
-                "limits": {name: getattr(settings, name, default) for name, default in
-                           (("max_context_tokens", 24000), ("model_context_tokens", 32768),
-                            ("max_output_tokens", 1800), ("max_tool_steps", 6), ("max_tool_calls", 12))}}
+                "limits": {"context_budget": budget(),
+                           "max_output_tokens": getattr(settings, "max_output_tokens", 4096),
+                           "max_tool_steps": getattr(settings, "max_tool_steps", 8),
+                           "max_tool_calls": getattr(settings, "max_tool_calls", 16)}}
+
+    @app.get("/api/data/overview")
+    async def data_overview():
+        from .overview import build_overview
+        notes_path = Path(settings.resources_path).parent / "data_notes.json"
+        indexed = [graph.store.resource(item["id"]) for item in graph.resources()]
+        # Описание пересобирается только после обновления индекса или заметок.
+        key = (tuple(item and item["indexed_at"] for item in indexed),
+               notes_path.stat().st_mtime if notes_path.exists() else None)
+        if overview_cache.get("key") != key:
+            notes = json.loads(notes_path.read_text(encoding="utf-8")) if notes_path.exists() else {}
+            value = await asyncio.to_thread(build_overview, Path(settings.data_dir) / "search.sqlite3",
+                                            graph.resources(), notes)
+            overview_cache.update(key=key, value=value)
+        return overview_cache["value"]
 
     @app.get("/api/sessions")
     async def sessions():
@@ -92,11 +158,11 @@ def create_app(settings=None) -> FastAPI:
 
     @app.post("/api/sessions", status_code=201)
     async def create_session():
-        return store.create()
+        return {**store.create(), "context_budget": budget()}
 
     @app.get("/api/sessions/{session_id}")
     async def session_detail(session_id: str):
-        return existing(session_id)
+        return {**existing(session_id), "context_budget": budget()}
 
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(session_id: str):
@@ -119,51 +185,56 @@ def create_app(settings=None) -> FastAPI:
         lock = locks.setdefault(session_id, asyncio.Lock())
         if lock.locked():
             raise HTTPException(409, "В этом диалоге уже формируется ответ.")
-        # Acquire before returning the response to prevent two simultaneous turns.
-        await lock.acquire()
-        runner = app.state.agent_factory(settings)
+        model_info = await current_model_info()
+        runner = app.state.agent_factory(settings, model_info=model_info)
 
         async def events():
-            cancelled, error = False, None
-            try:
-                yield sse("session", {"id": session_id, "title": text[:70] if session["title"] == "Новый диалог" else session["title"]})
-                async for event, payload in runner.run(text, store.history(session_id)):
-                    yield sse(event, payload)
-            except asyncio.CancelledError:
-                cancelled = True
-                runner.result.interrupted = True
-                raise
-            except ProviderError as exc:
-                error = {"message": str(exc), "code": exc.code}
-            except Exception:
-                error = {"message": "Не удалось выполнить запрос. Проверьте доступность MCP и индекс ресурсов.", "code": "agent_error"}
-            finally:
-                result = runner.result
-                if cancelled:
-                    suffix = "Ответ остановлен пользователем."
-                elif error:
-                    suffix = error["message"]
-                else:
-                    suffix = ""
-                content = result.content
-                if suffix:
-                    content += ("\n\n" if content else "") + suffix
-                    # Persist only complete tool groups, then a visible status.
-                    result.model_messages.append({"role": "assistant", "content": content})
-                if not content:
-                    content = "Модель не вернула ответ. Попробуйте уточнить запрос."
-                    result.model_messages.append({"role": "assistant", "content": content})
+            # Блокировка берётся внутри потока: если клиент отключится до его начала,
+            # диалог не останется заблокированным навсегда.
+            if lock.locked():
+                yield sse("error", {"message": "В этом диалоге уже формируется ответ.", "code": "busy"})
+                return
+            async with lock:
+                cancelled, error = False, None
                 try:
-                    message_id = store.save_turn(session_id, text, content, result.trace,
-                                                 result.usage, result.model_messages)
+                    title = text[:70] if session["title"] == "Новый диалог" else session["title"]
+                    yield sse("session", {"id": session_id, "title": title})
+                    async for event, payload in runner.run(text, store.history(session_id)):
+                        yield sse(event, payload)
+                except asyncio.CancelledError:
+                    cancelled = True
+                    runner.result.interrupted = True
+                    raise
+                except BaseExceptionGroup as group:
+                    leaf = leaf_exception(group)
+                    if isinstance(leaf, asyncio.CancelledError):
+                        cancelled = True
+                        runner.result.interrupted = True
+                        raise
+                    error = describe_error(leaf)
+                except Exception as failure:
+                    error = describe_error(failure)
                 finally:
-                    lock.release()
-            if error:
-                yield sse("error", error)
-            updated = store.get(session_id)
-            yield sse("usage", {"turn": runner.result.usage, "session": updated["usage"],
-                                "context_tokens": updated["context_tokens"], "context_estimated": True})
-            yield sse("done", {"message_id": message_id})
+                    result = runner.result
+                    suffix = "Ответ остановлен пользователем." if cancelled else error["message"] if error else ""
+                    content = result.content
+                    if suffix:
+                        content += ("\n\n" if content else "") + suffix
+                        # В историю модели попадают только завершённые группы инструментов.
+                        result.model_messages.append({"role": "assistant", "content": content})
+                    if not content:
+                        content = "Модель не вернула ответ. Попробуйте уточнить запрос."
+                        result.model_messages.append({"role": "assistant", "content": content})
+                    grounded = any(not item.get("is_error") for item in result.trace)
+                    message_id = store.save_turn(session_id, text, content, result.trace,
+                                                 result.usage, result.model_messages, grounded)
+                if error:
+                    yield sse("error", error)
+                updated = store.get(session_id)
+                yield sse("usage", {"turn": runner.result.usage, "session": updated["usage"],
+                                    "context_tokens": updated["context_tokens"], "context_budget": budget(),
+                                    "context_estimated": True})
+                yield sse("done", {"message_id": message_id})
 
         return StreamingResponse(events(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -185,6 +256,7 @@ def create_app(settings=None) -> FastAPI:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                log.exception("Обновление индекса не удалось")
                 refresh_error = "Не удалось обновить индекс. Проверьте учётные данные и подключение к IACPaaS."
         refresh_task = asyncio.create_task(refresh())
         return {"ok": True, "status": "started"}

@@ -1,12 +1,15 @@
 """HTTP-клиент IACPaaS: только вход и чтение разрешённых ресурсов."""
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 
 from .config import Settings
+
+log = logging.getLogger(__name__)
 
 
 class PlatformError(Exception):
@@ -77,7 +80,9 @@ class PlatformClient:
                                 raise PlatformError("EXPORT_TOO_LARGE", "Экспорт превышает лимит загрузки. Ограничьте область ресурсом меньшего размера.")
                 body = json.loads(raw)
                 if isinstance(body, dict) and body.get("success") is False:
-                    # Технические сообщения платформы могут содержать пользовательские пути.
+                    # Технические сообщения платформы могут содержать пользовательские пути,
+                    # поэтому в ответ инструмента не попадают, а пишутся только в лог сервера.
+                    log.warning("IACPaaS отклонила экспорт %s: %s", resource_path, body.get("explanationSafe") or body.get("error"))
                     raise PlatformError("PLATFORM_REJECTED", "Платформа отклонила экспорт: проверьте путь и права на ресурс.")
                 graph = body.get("data", body) if isinstance(body, dict) else body
                 if isinstance(graph, str):

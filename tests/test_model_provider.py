@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from materials_chat.config import Settings
-from materials_chat.openrouter import OpenRouterClient, ProviderError
+from materials_chat.openrouter import OpenRouterClient, ProviderError, fetch_model_info
 
 
 def test_routerai_env_names_are_loaded_without_disclosing_key(tmp_path):
@@ -57,3 +57,36 @@ async def test_routerai_error_names_current_provider_not_previous_one(monkeypatc
     settings = Settings(_env_file=None, ROUTERAI_API_KEY="local-test", ROUTERAI_MODEL="model")
     with pytest.raises(ProviderError, match="Ключ RouterAI отклонён"):
         _ = [chunk async for chunk in OpenRouterClient(settings).stream([], [])]
+
+
+@pytest.mark.asyncio
+async def test_model_window_and_rub_prices_come_from_the_provider_catalog(monkeypatch):
+    actual_client = httpx.AsyncClient
+    catalog = {"data": [{"id": "deepseek/deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash", "context_length": 1048576,
+                         "pricing": {"prompt": 5.3568843328e-06, "completion": 9.56586488e-06, "input_cache_read": 1.9e-07}}]}
+
+    def handle(request):
+        assert str(request.url) == "https://routerai.ru/api/v1/models"
+        return httpx.Response(200, json=catalog)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: actual_client(transport=httpx.MockTransport(handle), **kwargs))
+    settings = Settings(_env_file=None, ROUTERAI_API_KEY="local-test", ROUTERAI_MODEL="deepseek/deepseek-v4.1-flash")
+    info = await fetch_model_info(settings)
+    assert info["source"] == "provider" and info["currency"] == "RUB"
+    assert info["context_window"] == 1048576
+    assert info["price_input_per_million"] == pytest.approx(5.3568843328)
+    assert info["price_output_per_million"] == pytest.approx(9.56586488)
+
+    # Значения из .env важнее каталога.
+    override = Settings(_env_file=None, ROUTERAI_API_KEY="local-test", ROUTERAI_MODEL="deepseek/deepseek-v4.1-flash",
+                        model_context_tokens=64000, price_input_per_million=1.0)
+    info = await fetch_model_info(override)
+    assert info["context_window"] == 64000 and info["price_input_per_million"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_unreachable_catalog_leaves_prices_unknown(monkeypatch):
+    actual_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: actual_client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(503)), **kwargs))
+    info = await fetch_model_info(Settings(_env_file=None, ROUTERAI_API_KEY="local-test", ROUTERAI_MODEL="m"))
+    assert info["source"] == "unknown" and info["price_input_per_million"] is None

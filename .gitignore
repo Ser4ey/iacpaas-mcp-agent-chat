@@ -8,3 +8,4 @@ __pycache__/
 data/
 .research/
 .test-tmp-*/
+.playwright-mcp/

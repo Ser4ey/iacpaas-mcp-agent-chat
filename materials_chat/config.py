@@ -34,17 +34,28 @@ class Settings(BaseSettings):
     data_dir: Path = PROJECT_ROOT / "data"
     resources_path: Path = PROJECT_ROOT / "config" / "resources.json"
     history_path: Path = PROJECT_ROOT / "data" / "history.sqlite3"
-    model_context_tokens: int = Field(default=32768, ge=4096)
-    max_context_tokens: int = Field(default=24000, ge=2048)
-    max_output_tokens: int = Field(default=1800, ge=128, le=8192)
-    max_tool_steps: int = Field(default=6, ge=1, le=12)
-    max_tool_calls: int = Field(default=12, ge=1, le=24)
-    max_result_nodes: int = Field(default=60, ge=1, le=200)
+    # Окно контекста и цены модели по умолчанию берутся из каталога моделей провайдера
+    # (GET /models). Эти настройки нужны, только чтобы их переопределить.
+    model_context_tokens: int | None = Field(default=None, ge=4096)
+    max_context_tokens: int | None = Field(default=None, ge=2048)  # мягкий лимит истории
+    price_input_per_million: float | None = Field(default=None, ge=0)
+    price_output_per_million: float | None = Field(default=None, ge=0)
+    price_currency: str | None = None
+    max_output_tokens: int = Field(default=4096, ge=128, le=32768)
+    max_tool_steps: int = Field(default=8, ge=1, le=16)
+    max_tool_calls: int = Field(default=16, ge=1, le=32)
+    # Старые ходы диалога уходят в модель со сжатыми результатами инструментов.
+    history_full_turns: int = Field(default=2, ge=0, le=20)
+    history_tool_chars: int = Field(default=1500, ge=200, le=50000)
+    max_result_nodes: int = Field(default=150, ge=1, le=300)
     max_result_chars: int = Field(default=18000, ge=2000, le=50000)
+    # Живое чтение вершин и подграфов с IACPaaS (поиск всегда идёт по индексу).
+    live_reads: bool = True
+    live_max_nodes: int = Field(default=5000, ge=1)
+    live_cache_seconds: float = Field(default=60, ge=0)
     api_timeout_seconds: float = Field(default=65, ge=30, le=180)
     max_export_bytes: int = 64 * 1024 * 1024
     auto_sync_on_start: bool = True
-    demo_mode: bool = False
 
     @model_validator(mode="before")
     @classmethod

@@ -1,5 +1,10 @@
-"""Настоящий MCP-сервер на официальном SDK. Один набор tools, два транспорта."""
+"""Настоящий MCP-сервер на официальном SDK. Один набор tools, два транспорта.
+
+Все инструменты асинхронные: работа с SQLite уходит в поток (asyncio.to_thread),
+поэтому долгий запрос одного чата не останавливает сервер для остальных.
+"""
 import argparse
+import asyncio
 import logging
 
 from mcp.server.fastmcp import FastMCP
@@ -15,39 +20,42 @@ def create_server(settings: Settings | None = None) -> FastMCP:
                   stateless_http=True, json_response=True)
 
     @mcp.tool()
-    def list_inforesources(filter: str = "", limit: int = 20) -> ToolResult:
+    async def list_inforesources(filter: str = "", limit: int = 20) -> ToolResult:
         """Список разрешённых баз и онтологий. Это метаданные, не сведения о свойствах материалов."""
-        return service.list_inforesources(filter, limit)
+        return await asyncio.to_thread(service.list_inforesources, filter, limit)
 
     @mcp.tool()
-    def get_inforesource(resource_id: str) -> ToolResult:
-        """Метаданные базы: root, онтология, дата синхронизации и размер графа."""
-        return service.get_inforesource(resource_id)
+    async def get_inforesource(resource_id: str) -> ToolResult:
+        """Метаданные ресурса прямо с IACPaaS: root, онтология, дата изменения, размер графа."""
+        return await service.get_inforesource(resource_id)
 
     @mcp.tool()
-    def search_graph(query: str, resource_id: str | None = None, limit: int = 8, offset: int = 0) -> ToolResult:
-        """Лексический поиск в локальном индексе реальных данных IACPaaS. Ищите короткими терминами/марками.
-        Возвращает node_id, фрагменты, total и has_more. Уточняйте запрос вместо выгрузки всех результатов.
+    async def search_graph(query: str, resource_id: str | None = None, limit: int = 8, offset: int = 0) -> ToolResult:
+        """Лексический поиск по локальному индексу данных IACPaaS (у платформы нет поиска по тексту).
+        Ищите короткими терминами/марками. Возвращает node_id, фрагменты, total и has_more.
         Отсутствие совпадения относится только к указанному охвату и состоянию индекса.
         """
-        return service.search_graph(query, resource_id, limit, offset)
+        return await asyncio.to_thread(service.search_graph, query, resource_id, limit, offset)
 
     @mcp.tool()
-    def get_subgraph(resource_id: str, root: str, depth: int = 2, max_nodes: int = 40, offset: int = 0) -> ToolResult:
-        """Прочитать свойства/значения от найденной вершины. root берите из tool result, не угадывайте.
-        Глубина до 5, до 60 вершин. При has_more используйте next_offset или уточните корень.
+    async def get_subgraph(resource_id: str, root: str, depth: int = 3, max_nodes: int = 80, offset: int = 0) -> ToolResult:
+        """Прочитать вершину и её свойства/значения прямо с IACPaaS (при недоступности — из индекса).
+        root берите из результатов инструментов, не угадывайте. Глубина до 5, до 150 вершин.
+        Запись целиком (например, материал со всем составом) читайте ОДНИМ вызовом от вершины
+        записи с depth 3–4, а не по вершине на каждый компонент: каждое чтение идёт на платформу.
+        При has_more используйте next_offset или уточните корень.
         """
-        return service.get_subgraph(resource_id, root, depth, max_nodes, offset)
+        return await service.get_subgraph(resource_id, root, depth, max_nodes, offset)
 
     @mcp.tool()
-    def count_graph(resource_id: str, root: str | None = None) -> ToolResult:
-        """Точное число уникальных вершин и дуг сохранённого графа/подграфа, без раскрытия внешних ссылок."""
-        return service.count_graph(resource_id, root)
+    async def count_graph(resource_id: str, root: str | None = None) -> ToolResult:
+        """Точное число уникальных вершин и дуг графа или подграфа (по индексу), без раскрытия внешних ссылок."""
+        return await asyncio.to_thread(service.count_graph, resource_id, root)
 
     @mcp.tool()
-    def validate_resource(resource_id: str) -> ToolResult:
+    async def validate_resource(resource_id: str) -> ToolResult:
         """Базовая проверка структуры индекса; не выполняет предметные вычисления и не меняет ресурс."""
-        return service.validate_resource(resource_id)
+        return await asyncio.to_thread(service.validate_resource, resource_id)
 
     return mcp
 
