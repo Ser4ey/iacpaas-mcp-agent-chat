@@ -1,0 +1,17 @@
+name: iacpaas-materials-chat
+services:
+  chat:
+    build: .
+    init: true
+    env_file: .env
+    environment:
+      APP_HOST: 0.0.0.0
+      MCP_HOST: 127.0.0.1
+      APP_PORT: 8000
+      MCP_PORT: 8001
+      MCP_URL: http://127.0.0.1:8001/mcp
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
