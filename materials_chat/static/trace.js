@@ -195,7 +195,7 @@ function sourceLabel(result) {
   const node = span(`tool-source ${kind}`, text);
   // live_error — объект {code, message}; в старых сохранённых диалогах это строка.
   const liveError = meta.live_error;
-  const liveText = typeof liveError === 'string' ? liveError : liveError?.message ?? liveError?.code;
+  const liveText = typeof liveError === 'string' ? liveError : liveError?.message || liveError?.code;
   if (liveText) node.title = `Платформа: ${liveText}`;
   return node;
 }
@@ -230,16 +230,19 @@ const OP_SIGNS = { '>=': '≥', '<=': '≤' };
 
 /** Условия по составу, класс и сортировка: «Cr > 20 · нет Ni · Сплавы на основе железа». */
 function describeComposition(args) {
-  const conditions = (Array.isArray(args.conditions) ? args.conditions : []).map(describeCondition);
+  // Показываем ровно то, что прислала модель, даже если бэкенд отклонил: мусорные записи пропускаем.
+  const list = Array.isArray(args.conditions) ? args.conditions : [];
+  const conditions = list.filter((item) => item && typeof item === 'object').map(describeCondition);
   const sort = args.sort_by && (args.order === 'asc' ? `по возрастанию ${args.sort_by}` : `топ по ${args.sort_by}`);
   return [...conditions, args.material_class, sort].filter(Boolean).join(' · ');
 }
 
-function describeCondition({ element, op, value, include_unlisted: unlisted } = {}) {
-  if (!element) return '';
-  if (op === 'present') return `есть ${element}`;
-  if (op === 'absent') return `нет ${element}`;
-  const text = `${element} ${OP_SIGNS[op] ?? op} ${value}`;
+function describeCondition({ element, op, value, include_unlisted: unlisted }) {
+  const name = element || '?';
+  if (op === 'present') return `есть ${name}`;
+  if (op === 'absent') return `нет ${name}`;
+  if (!(op in OP_SIGNS) && !['>', '<'].includes(op)) return name; // неизвестная операция — только элемент
+  const text = `${name} ${OP_SIGNS[op] ?? op} ${value ?? '?'}`;
   return unlisted ? `${text} (и без элемента)` : text;
 }
 
@@ -265,7 +268,7 @@ function describeResult(name, result) {
     case 'find_materials':
       if (typeof data.total !== 'number') return '';
       return (data.total ? plural(data.total, ['марка', 'марки', 'марок']) : 'нет марок')
-        + (data.has_more ? ', есть ещё' : '');
+        + (data.total && data.has_more ? ', есть ещё' : '');
     default:
       return '';
   }
