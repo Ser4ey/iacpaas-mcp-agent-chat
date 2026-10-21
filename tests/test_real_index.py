@@ -98,11 +98,12 @@ def ranges(copy):
     return result
 
 
-def pages(service, conditions, **options):
+def pages(service, conditions, limit=50, **options):
     items, offset = [], 0
     while offset is not None:
-        result = service.find_materials(conditions, limit=50, offset=offset, **options)
+        result = service.find_materials(conditions, limit=limit, offset=offset, **options)
         assert result.ok, result.error
+        assert len(result.data["materials"]) <= limit
         items += result.data["materials"]
         offset = result.data["next_offset"]
     assert len(items) == result.data["total"] == len({item["node_id"] for item in items})
@@ -133,8 +134,35 @@ def test_chromium_without_nickel(service, ranges):
 
 
 def test_iron_at_least_25_pages_add_up(service, ranges):
-    found = pages(service, [{"element": "Fe", "op": ">=", "value": 25}])
+    # Страница меньше выдачи: сумма нескольких страниц должна дать total без повторов и пропусков.
+    found = pages(service, [{"element": "Fe", "op": ">=", "value": 25}], limit=5)
+    assert len(found) > 5
     assert {item["node_id"] for item in found} == {key for key, value in ranges["Fe"].items() if value and value[0] >= 25}
+
+
+def test_values_without_numbers_match_the_structure(copy, service):
+    """Независимая от разбора чисел сверка: «нет значения» — ровно у элементов, под которыми только «%»."""
+    db = sqlite3.connect(copy / "search.sqlite3")
+    meta = dict(db.execute("SELECT node_id, meta FROM nodes WHERE resource_id='materials'"))
+    parent, kids = {}, {}
+    for up, down in db.execute("SELECT parent_id, child_id FROM edges WHERE resource_id='materials'"):
+        parent.setdefault(down, up)
+        kids.setdefault(up, []).append(down)
+    db.close()
+
+    def in_material(element_id):
+        """Элемент прямо под «Компонент» записи марки (не «Основа», «Расчетное», «Совокупность»)."""
+        component = parent.get(element_id)
+        composition = parent.get(component) if component else None
+        material = parent.get(composition) if composition else None
+        return meta.get(component) == "Компонент" and meta.get(material) == "Материал"
+
+    bare = [node_id for node_id, kind in meta.items() if kind == "Химический элемент" and in_material(node_id)
+            and all(meta[kid] == "%" for kid in kids.get(node_id, []))]
+    entries = [entry for record in service.store.composition("materials") for entry in record["contents"].values()]
+    assert bare and sum(entry["form"] == "нет значения" for entry in entries) == len(bare)
+    numeric = {"Не более", "Не менее", "Числовой интервал", "Числовое значение"}
+    assert all(entry["low"] is not None and entry["high"] is not None for entry in entries if entry["form"] in numeric)
 
 
 def test_bromine_is_not_in_any_composition(service):
