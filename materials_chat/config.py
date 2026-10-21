@@ -25,6 +25,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("ROUTERAI_MODEL", "OPENROUTER_MODEL"))
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1",
         validation_alias=AliasChoices("ROUTERAI_BASE_URL", "ROUTERAI_BASEURL", "OPENROUTER_BASE_URL"))
+    # Модель проверки ответа; пусто — та же, что у агента.
+    verifier_model: str = Field(default="", validation_alias=AliasChoices("VERIFIER_MODEL", "verifier_model"))
     app_host: str = "127.0.0.1"
     app_port: int = Field(default=8000, ge=1, le=65535)
     mcp_host: str = "127.0.0.1"

@@ -58,6 +58,12 @@ def tool_reply(*names):
     return [event({"role": "assistant", "tool_calls": calls}, "tool_calls")]
 
 
+def verdict_reply(claims):
+    call = {"index": 0, "id": "verdict", "type": "function", "function": {
+        "name": "submit_verdict", "arguments": json.dumps({"claims": claims}, ensure_ascii=False)}}
+    return [event({"role": "assistant", "tool_calls": [call]}, "tool_calls")]
+
+
 def sse(events):
     lines = [json.dumps({"id": "chatcmpl-test", "object": "chat.completion.chunk", "created": 0,
                          "model": "local-model", **item}, ensure_ascii=False) for item in events]
