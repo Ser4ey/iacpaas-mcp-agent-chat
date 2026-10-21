@@ -154,3 +154,143 @@ def test_unindexed_resource_has_no_composition(store):
 def test_element_names_come_from_the_elements_base(store):
     store.import_graph("elements", elements_base())
     assert store.element_symbols() == {"хром": "Cr", "железо": "Fe", "бром": "Br"}
+
+
+from materials_chat.config import Settings
+from materials_chat.service import GraphService
+
+
+def make_service(tmp_path, imported=True):
+    config = tmp_path / "resources.json"
+    config.write_text(json.dumps([
+        {"id": "materials", "title": "Справочник по материалам", "path": "Тест / Материалы", "kind": "information"},
+        {"id": "elements", "title": "Элементы", "path": "Тест / Элементы", "kind": "information"},
+    ], ensure_ascii=False), encoding="utf-8")
+    result = GraphService(Settings(_env_file=None, resources_path=config, data_dir=tmp_path / "data", live_reads=False,
+                                   iacpaas_username="", iacpaas_password="", openrouter_api_key=""))
+    if imported:
+        result.store.import_graph("materials", catalog())
+        result.store.import_graph("elements", elements_base())
+    return result
+
+
+@pytest.fixture
+def service(tmp_path):
+    return make_service(tmp_path)
+
+
+def find(service, *conditions, **options):
+    return service.find_materials(list(conditions), **options)
+
+
+def names(result):
+    assert result.ok, result.error
+    return [item["name"] for item in result.data["materials"]]
+
+
+def test_thresholds_are_guaranteed_by_the_range(service):
+    assert names(find(service, {"element": "Cr", "op": ">", "value": 20})) == ["Х21", "Х25"]
+    assert names(find(service, {"element": "Cr", "op": ">=", "value": 20})) == ["Х20", "Х21", "Х25"]
+    assert names(find(service, {"element": "Fe", "op": "<", "value": 1})) == ["АМг3"]
+    assert names(find(service, {"element": "Fe", "op": "<=", "value": 0.5})) == ["АМг3"]
+    result = find(service, {"element": "Cr", "op": ">", "value": 20})
+    assert (result.data["total"], result.data["has_more"], result.data["next_offset"]) == (2, False, None)
+    assert result.data["materials"][0] == {"node_id": "350", "name": "Х21", "class": "Сплавы на основе железа",
+        "base": "Fe", "contents": {"Cr": {"form": "Не менее", "low": 21.0, "high": 100.0, "text": "не менее 21.0 %"}}}
+    assert result.data["resource_id"] == "materials" and result.data["rules"].startswith("«> X» — нижняя граница")
+    assert result.meta["served_from"] == "local_index" and result.meta["indexed_at"]
+
+
+def test_presence_absence_and_unknown_ranges(service):
+    assert names(find(service, {"element": "Cr", "op": "present"}, {"element": "Ni", "op": "absent"})) == \
+        ["АМг3", "Х21", "Х25"]
+    # «Расчетное» и «совокупность»: элемент есть, диапазон неизвестен — числовые условия не проходят.
+    assert names(find(service, {"element": "Ti", "op": "present"})) == ["12Х18Н10Т", "КС25"]
+    assert names(find(service, {"element": "Ti", "op": ">", "value": 0})) == []
+    assert names(find(service, {"element": "Ni", "op": "<", "value": 1})) == ["Х20"]
+
+
+def test_unlisted_element_passes_less_than_only_with_the_flag(service):
+    result = find(service, {"element": "Ni", "op": "<", "value": 1, "include_unlisted": True})
+    assert names(result) == ["АМг3", "Х20", "Х21", "Х25"]
+    assert result.data["materials"][0]["contents"]["Ni"] == {"form": "не указан в составе", "low": None,
+                                                             "high": None, "text": "не указан в составе"}
+
+
+def test_sorting_by_element_puts_impurity_limits_last(service):
+    top = find(service, sort_by="Cr", limit=3)
+    assert names(top) == ["Х25", "Х21", "Х20"] and top.data["total"] == 5 and top.data["has_more"]
+    assert names(find(service, sort_by="Cr", order="asc")) == ["АМг3", "12Х18Н10Т", "Х20", "Х21", "Х25"]
+    assert names(find(service, sort_by="Ti")) == ["12Х18Н10Т", "КС25"]  # неизвестные диапазоны — в конце
+
+
+def test_elements_absent_from_all_compositions(service):
+    present = find(service, {"element": "Br", "op": "present"})
+    assert present.ok and present.data["total"] == 0 and present.data["elements_not_in_compositions"] == ["Br"]
+    assert find(service, {"element": "W", "op": "absent"}).data["total"] == 6
+    assert find(service, {"element": "Cr", "op": "present"}).data["elements_not_in_compositions"] == []
+
+
+def test_element_spellings_and_russian_names_are_resolved(service):
+    for spelling in ("Cr", "CR", " cr ", "Хром", "хром"):
+        result = find(service, {"element": spelling, "op": ">", "value": 20})
+        assert names(result) == ["Х21", "Х25"], spelling
+        assert set(result.data["materials"][0]["contents"]) == {"Cr"}
+    assert names(find(service, {"element": "железо", "op": "<", "value": 1})) == ["АМг3"]
+    unknown = find(service, {"element": "унобтаний", "op": "present"})
+    assert unknown.ok and unknown.data["elements_not_in_compositions"] == ["унобтаний"]
+
+
+def test_class_filter_includes_nested_classes(service):
+    assert names(find(service, material_class="магнитные")) == ["КС25"]
+    assert names(find(service, material_class="Редкоземельные сплавы")) == ["КС25"]
+    assert names(find(service, {"element": "Cr", "op": ">", "value": 20}, material_class="сплавы на основе железа")) \
+        == ["Х21", "Х25"]
+    assert find(service, material_class="Магнитные").data["materials"][0]["class"] == "Редкоземельные сплавы / Магнитные"
+    unknown = find(service, material_class="Бронзы")
+    assert not unknown.ok and unknown.error.code == "UNKNOWN_CLASS"
+    assert "Сплавы на основе алюминия" in unknown.error.message
+
+
+def test_overview_without_conditions_is_alphabetical_and_paged(service):
+    pages, offset = [], 0
+    while offset is not None:
+        page = find(service, limit=4, offset=offset)
+        pages.append(names(page))
+        offset = page.data["next_offset"]
+    assert pages == [["12Х18Н10Т", "АМг3", "КС25", "Х20"], ["Х21", "Х25"]]
+    assert find(service, limit=1).data["materials"][0]["contents"] == {}
+
+
+@pytest.mark.parametrize("conditions, options", [
+    ([{"element": "Cr", "op": ">"}], {}),
+    ([{"element": "Cr", "op": "present", "value": 1}], {}),
+    ([{"element": "Cr", "op": "~", "value": 1}], {}),
+    ([{"element": "Cr", "op": ">", "value": 150}], {}),
+    ([{"element": "Cr", "op": ">", "value": 1, "include_unlisted": True}], {}),
+    ([{"op": ">", "value": 1}], {}),
+    ([{"element": "Cr", "op": "present"}] * 11, {}),
+    ([], {"order": "up"}),
+])
+def test_invalid_conditions_are_diagnostic(service, conditions, options):
+    result = service.find_materials(conditions, **options)
+    assert not result.ok and result.error.code == "INVALID_CONDITION"
+
+
+@pytest.mark.parametrize("options", [{"limit": 0}, {"limit": 51}, {"offset": -1}])
+def test_paging_limits(service, options):
+    result = service.find_materials([], **options)
+    assert not result.ok and result.error.code == "LIMIT_EXCEEDED"
+
+
+def test_index_not_ready(tmp_path):
+    result = make_service(tmp_path, imported=False).find_materials([])
+    assert not result.ok and result.error.code == "INDEX_NOT_READY"
+
+
+def test_page_fits_the_result_budget(service):
+    service.settings.max_result_chars = 1500
+    result = find(service, {"element": "Cr", "op": "present"}, {"element": "Fe", "op": "present"}, limit=50)
+    assert result.ok and result.data["has_more"] and result.data["total"] == 5
+    assert result.data["next_offset"] == len(result.data["materials"]) < 5
+    assert len(json.dumps(result.model_dump(), ensure_ascii=False)) <= 1500

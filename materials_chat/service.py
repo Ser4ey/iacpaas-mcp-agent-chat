@@ -14,6 +14,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .composition import (RULES, ConditionError, class_names, in_class, parse_conditions, project,
+                          resolve_element, select_materials)
 from .config import Settings
 from .graph_store import GraphStore, subgraph_from_export
 from .platform import PlatformClient, PlatformError, concept_path, utc_now
@@ -22,6 +24,7 @@ log = logging.getLogger(__name__)
 
 # Самая глубокая запись марки — 7 уровней от вершины марки: любая запись читается одним вызовом.
 MAX_DEPTH = 8
+COMPOSITION_RESOURCE = "materials"
 
 
 class ResourceDefinition(BaseModel):
@@ -397,3 +400,42 @@ class GraphService:
                 "not_checked": ["domain_consistency", "ontology_constraints", "external_reference_access"],
                 "note": "Это базовая локальная проверка структуры, не проверка полноты знаний платформой."},
                 meta=self._metadata(definition, indexed))
+
+    def find_materials(self, conditions: list[dict] | None = None, material_class: str | None = None,
+                       sort_by: str | None = None, order: str = "desc", limit: int = 20, offset: int = 0) -> ToolResult:
+        """Подбор марок по условиям на состав; пороги проверяются по границам диапазона, а не по середине."""
+        try:
+            parsed = parse_conditions(conditions)
+        except ConditionError as error:
+            return fail("INVALID_CONDITION", str(error))
+        if order not in ("desc", "asc"):
+            return fail("INVALID_CONDITION", "order: desc или asc.")
+        if not 1 <= limit <= 50 or not 0 <= offset <= 100000:
+            return fail("LIMIT_EXCEEDED", "Допустимы limit 1–50 и offset 0–100000.")
+        definition, indexed, error = self._ready(COMPOSITION_RESOURCE)
+        if error:
+            return error
+        everything = self.store.composition(COMPOSITION_RESOURCE)
+        records = everything
+        if material_class:
+            records = [record for record in everything if in_class(record, material_class)]
+            if not records:
+                return fail("UNKNOWN_CLASS", "Класс не найден. Классы: " + "; ".join(class_names(everything)) + ".")
+        russian = self.store.element_symbols()
+        in_any = {symbol for record in everything for symbol in record["contents"]}
+        known = in_any | set(russian.values())
+
+        def resolve(text: str) -> str:
+            return resolve_element(text, known, russian)
+        pairs = [(resolve(condition.element), condition) for condition in parsed]
+        sort_symbol = resolve(sort_by) if sort_by and sort_by.strip() else None
+        mentioned = list(dict.fromkeys([symbol for symbol, _ in pairs] + ([sort_symbol] if sort_symbol else [])))
+        selected = select_materials(records, pairs, sort_symbol, order == "desc")
+        page = [project(record, mentioned) for record in selected[offset:offset + limit]]
+        more = offset + len(page) < len(selected)
+        result = ToolResult(ok=True, data={
+            "resource_id": definition.id, "total": len(selected), "materials": page, "limit": limit, "offset": offset,
+            "has_more": more, "next_offset": offset + len(page) if more else None, "rules": RULES,
+            "elements_not_in_compositions": [symbol for symbol in mentioned if symbol not in in_any]},
+            meta=self._metadata(definition, indexed))
+        return self._fit_result(result, "materials", offset)

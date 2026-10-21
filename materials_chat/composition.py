@@ -2,6 +2,8 @@
 import json
 import sqlite3
 
+from pydantic import BaseModel, Field, ValidationError
+
 FORM_UNLISTED = "не указан в составе"
 FORM_NONE = "нет значения"
 FORM_AGGREGATE = "Совокупность химических элементов"
@@ -133,3 +135,111 @@ def rebuild_composition(db: sqlite3.Connection, resource_id: str, indexed_at: st
                         for symbol, item in record["contents"].items()])
     db.execute("INSERT INTO composition_state VALUES (?,?)", (resource_id, indexed_at))
     return len(records)
+
+
+RULES = ("«> X» — нижняя граница диапазона больше X; «< X» — верхняя граница меньше X; "
+         "марки без элемента в составе проходят «<» только с include_unlisted")
+MAX_CONDITIONS = 10
+_NUMERIC = {">", ">=", "<", "<="}
+_OPS = _NUMERIC | {"present", "absent"}
+
+
+class ConditionError(ValueError):
+    """Условие или параметр запроса некорректны; текст сообщения уходит модели как подсказка."""
+
+
+class Condition(BaseModel):
+    """Одно условие на содержание элемента; все условия запроса объединяются через «И»."""
+    element: str = Field(description="Элемент: символ (Cr, Ni) или русское название (хром, никель).")
+    op: str = Field(description="Операция: «>», «>=», «<», «<=» (граница в процентах), "
+                                "«present» — элемент есть в составе, «absent» — его нет.")
+    value: float | None = Field(default=None, description="Порог в процентах, 0–100; для present/absent не задаётся.")
+    include_unlisted: bool = Field(default=False, description="Только для «<» и «<=»: считать подходящими и марки, "
+                                   "у которых элемент в составе не указан.")
+
+
+def parse_conditions(raw: list[dict] | None) -> list[Condition]:
+    """Проверяет условия; первое же нарушение — ConditionError с указанием номера условия."""
+    raw = raw or []
+    if len(raw) > MAX_CONDITIONS:
+        raise ConditionError(f"Условий не больше {MAX_CONDITIONS}.")
+    result = []
+    for number, item in enumerate(raw, 1):
+        try:
+            condition = Condition.model_validate(item)
+        except ValidationError as error:
+            raise ConditionError(f"Условие {number}: нужны element и op, value — число ({error.errors()[0]['msg']}).")
+        if not condition.element.strip():
+            raise ConditionError(f"Условие {number}: не указан element.")
+        if condition.op not in _OPS:
+            raise ConditionError(f"Условие {number}: op должен быть одним из {', '.join(sorted(_OPS))}.")
+        if condition.op in _NUMERIC and condition.value is None:
+            raise ConditionError(f"Условие {number}: для «{condition.op}» нужен value.")
+        if condition.op not in _NUMERIC and condition.value is not None:
+            raise ConditionError(f"Условие {number}: для «{condition.op}» value не задаётся.")
+        if condition.value is not None and not 0 <= condition.value <= 100:
+            raise ConditionError(f"Условие {number}: value в процентах, от 0 до 100.")
+        if condition.include_unlisted and condition.op not in ("<", "<="):
+            raise ConditionError(f"Условие {number}: include_unlisted допустим только для «<» и «<=».")
+        result.append(condition)
+    return result
+
+
+def resolve_element(text: str, symbols: set[str], russian: dict[str, str]) -> str:
+    """Символ элемента: без учёта регистра среди известных, затем по русскому названию, иначе строка как есть."""
+    from .graph_store import normalized  # graph_store сам импортирует этот модуль
+    text = text.strip()
+    by_case = {symbol.lower(): symbol for symbol in symbols}
+    if text.lower() in by_case:
+        return by_case[text.lower()]
+    return russian.get(normalized(text), text)
+
+
+def _passes(entry: dict | None, condition: Condition) -> bool:
+    if condition.op == "present":
+        return entry is not None
+    if condition.op == "absent":
+        return entry is None
+    if entry is None:
+        return condition.include_unlisted and condition.op in ("<", "<=")
+    low, high, value = entry["low"], entry["high"], condition.value
+    if low is None or high is None:
+        return False  # диапазон неизвестен — гарантировать нечего
+    return {">": low > value, ">=": low >= value, "<": high < value, "<=": high <= value}[condition.op]
+
+
+def class_names(records: list[dict]) -> list[str]:
+    return sorted({name for record in records for name in record["classes"]})
+
+
+def in_class(record: dict, material_class: str) -> bool:
+    """Класс совпадает с любым звеном цепочки или со всей цепочкой через « / », без учёта регистра."""
+    wanted = material_class.strip().lower()
+    return wanted in {name.lower() for name in record["classes"]} or wanted == " / ".join(record["classes"]).lower()
+
+
+def _order_key(record: dict, symbol: str, descending: bool):
+    entry = record["contents"][symbol]
+    if entry["low"] is None or entry["high"] is None:
+        return (1, 0, 0, record["name"])  # неизвестный диапазон — в конце при любом порядке
+    sign = -1 if descending else 1
+    return (0, sign * entry["low"], sign * entry["high"], record["name"])
+
+
+def select_materials(records: list[dict], conditions: list[tuple[str, Condition]], sort_symbol: str | None,
+                     descending: bool = True) -> list[dict]:
+    """Марки, прошедшие все условия, в порядке сортировки; conditions — пары (символ, условие)."""
+    found = [record for record in records
+             if all(_passes(record["contents"].get(symbol), condition) for symbol, condition in conditions)
+             and (sort_symbol is None or sort_symbol in record["contents"])]
+    if sort_symbol is None:
+        return found  # records уже по алфавиту
+    return sorted(found, key=lambda record: _order_key(record, sort_symbol, descending))
+
+
+def project(record: dict, symbols: list[str]) -> dict:
+    """Карточка марки для ответа: только запрошенные элементы, отсутствующие помечены явно."""
+    unlisted = {"form": FORM_UNLISTED, "low": None, "high": None, "text": FORM_UNLISTED}
+    return {"node_id": record["node_id"], "name": record["name"], "class": " / ".join(record["classes"]),
+            "base": record["base"],
+            "contents": {symbol: dict(record["contents"].get(symbol, unlisted)) for symbol in symbols}}
