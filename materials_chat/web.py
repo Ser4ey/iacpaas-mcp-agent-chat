@@ -20,6 +20,7 @@ from .agent import Agent, context_budget
 from .answer_check import check_numbers
 from .openrouter import ProviderError, fetch_model_info
 from .sessions import SessionStore
+from .verifier import verifier_model_name, verify_answer
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +108,7 @@ def create_app(settings=None) -> FastAPI:
     # These attributes make the small app easy to test without paid model calls.
     app.state.settings, app.state.store, app.state.graph = settings, store, graph
     app.state.agent_factory = Agent
+    app.state.verifier, app.state.locks = verify_answer, locks
     app.state.model_info = dict(UNKNOWN_MODEL)
 
     def existing(session_id):
@@ -249,6 +251,32 @@ def create_app(settings=None) -> FastAPI:
 
         return StreamingResponse(events(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.post("/api/sessions/{session_id}/messages/{message_id}/verify")
+    async def verify(session_id: str, message_id: str):
+        """Проверить ответ по данным диалога отдельным запросом к модели; вердикт сохраняется в диалоге."""
+        turn = store.turn(session_id, message_id)
+        if turn is None:
+            raise HTTPException(404, "Ответ не найден.")
+        if not getattr(settings, "openrouter_api_key", "") or not getattr(settings, "openrouter_model", ""):
+            names = getattr(settings, "model_setting_names", ("OPENROUTER_API_KEY", "OPENROUTER_MODEL"))
+            raise HTTPException(503, f"Заполните {' и '.join(names)} в .env и перезапустите приложение.")
+        lock = locks.get(session_id)
+        if lock and lock.locked():
+            raise HTTPException(409, "В этом диалоге сейчас формируется ответ. Проверьте после его завершения.")
+        # Цены известны только модели агента: у другой проверяющей модели стоимость берётся из usage.cost.
+        same_model = verifier_model_name(settings) == settings.openrouter_model
+        model_info = await current_model_info() if same_model else None
+        try:
+            verification = await app.state.verifier(settings, turn["question"], turn["answer"], turn["traces"],
+                                                    model_info=model_info)
+        except ProviderError as error:
+            status = {"no_data": 422, "context_limit": 413}.get(error.code, 502)
+            raise HTTPException(status, str(error))
+        store.save_verification(message_id, verification)
+        detail = store.get(session_id)
+        saved = next(item for item in detail["messages"] if item["id"] == message_id)["verification"]
+        return {"message_id": message_id, "verification": saved, "session_usage": detail["usage"]}
 
     @app.post("/api/index/refresh", status_code=202)
     async def refresh_index():

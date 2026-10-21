@@ -52,7 +52,7 @@ class SessionStore:
             usage TEXT NOT NULL, model_messages TEXT NOT NULL);
         """)
         # Миграция: признак «ответ опирается на данные инструментов», ошибка хода
-        # (отдельно от текста ответа) и сверка чисел появились позже.
+        # (отдельно от текста ответа), сверка чисел и вердикт проверки появились позже.
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(messages)")}
         if "grounded" not in columns:
             self.db.execute("ALTER TABLE messages ADD COLUMN grounded INTEGER")
@@ -60,6 +60,8 @@ class SessionStore:
             self.db.execute("ALTER TABLE messages ADD COLUMN error TEXT")
         if "number_check" not in columns:
             self.db.execute("ALTER TABLE messages ADD COLUMN number_check TEXT")
+        if "verification" not in columns:
+            self.db.execute("ALTER TABLE messages ADD COLUMN verification TEXT")
         self.db.commit()
 
     def create(self) -> dict:
@@ -83,7 +85,12 @@ class SessionStore:
             message["grounded"] = None if message["grounded"] is None else bool(message["grounded"])
             message["error"] = json.loads(message["error"]) if message["error"] else None
             message["number_check"] = json.loads(message["number_check"]) if message["number_check"] else None
+            message["verification"] = json.loads(message["verification"]) if message["verification"] else None
             usage = add_usage(usage, message["usage"])
+            if message["verification"]:
+                # Деньги за все проверки ответа входят в сумму диалога, даже за заменённые.
+                check = message["verification"]
+                usage = add_usage(usage, check.get("usage_total") or check.get("usage") or {})
             message.pop("session_id")
             message.pop("model_messages")
             messages.append(message)
@@ -120,6 +127,32 @@ class SessionStore:
             rows = self.db.execute("SELECT trace FROM messages WHERE session_id=? AND role='assistant' ORDER BY rowid",
                                    (session_id,)).fetchall()
         return [entry for row in rows for entry in json.loads(row["trace"])]
+
+    def turn(self, session_id: str, message_id: str) -> dict | None:
+        """Ответ ассистента для проверки: вопрос, текст и журналы всех ответов до этого включительно."""
+        with self._lock:
+            rows = self.db.execute("SELECT id,role,content,trace FROM messages WHERE session_id=? ORDER BY rowid",
+                                   (session_id,)).fetchall()
+        question, traces = "", []
+        for row in rows:
+            if row["role"] == "user":
+                question = row["content"]
+                continue
+            traces.extend(json.loads(row["trace"]))
+            if row["id"] == message_id:
+                return {"question": question, "answer": row["content"], "traces": traces}
+        return None
+
+    def save_verification(self, message_id: str, verification: dict) -> None:
+        """Повторная проверка заменяет вердикт; usage_total копит расход всех проверок этого ответа."""
+        with self._lock, self.db:
+            row = self.db.execute("SELECT verification FROM messages WHERE id=?", (message_id,)).fetchone()
+            previous = json.loads(row["verification"]) if row and row["verification"] else None
+            before = (previous.get("usage_total") or previous.get("usage")) if previous else None
+            usage = verification.get("usage") or {}
+            saved = {**verification, "usage_total": add_usage(before, usage) if before else usage}
+            self.db.execute("UPDATE messages SET verification=? WHERE id=?",
+                            (json.dumps(saved, ensure_ascii=False), message_id))
 
     def save_turn(self, session_id: str, user: str, answer: str, trace: list, usage: dict,
                   model_messages: list | None = None, grounded: bool | None = None,

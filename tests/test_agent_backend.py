@@ -370,6 +370,7 @@ def test_old_history_database_is_migrated(tmp_path):
     detail = store.get("s")
     assert detail["messages"][0]["grounded"] is None
     assert detail["messages"][0]["number_check"] is None
+    assert detail["messages"][0]["verification"] is None
     assert detail["usage"]["cost"] == pytest.approx(5.0)
     store.close()
 
@@ -516,3 +517,61 @@ def test_number_check_failure_does_not_lose_the_turn(tmp_path, monkeypatch):
         saved = client.get(f"/api/sessions/{session_id}").json()["messages"]
         assert [m["role"] for m in saved] == ["user", "assistant"]
         assert saved[1]["number_check"] is None
+
+
+FIND_ENTRY = {"id": "f", "name": "find_materials", "arguments": {"sort_by": "Cr", "limit": 1}, "is_error": False,
+              "result": {"ok": True, "data": {"total": 5, "materials": [
+                  {"node_id": "200", "name": "Х25", "contents": {"Cr": {"low": 23.0, "high": 27.0, "text": "23.0–27.0 %"}}}]}}}
+
+
+def with_verifier(app, provider):
+    from materials_chat.verifier import verify_answer
+    app.state.verifier = lambda config, *args, **kwargs: verify_answer(config, *args, model=provider.model(config),
+                                                                       **kwargs)
+
+
+def test_verify_saves_the_verdict_and_adds_its_cost(tmp_path):
+    from fastapi.testclient import TestClient
+    app = make_app(tmp_path)
+    app.state.agent_factory = scripted_agent([("Больше всего хрома у Х25: 23–27 %.", [FIND_ENTRY])])
+    provider = Provider(verdict_reply([{"text": "У Х25 хрома 23–27 %", "status": "confirmed",
+                                        "node_id": "200", "evidence": "23.0–27.0 %"}]))
+    with_verifier(app, provider)
+    with TestClient(app) as client:
+        session_id = client.post("/api/sessions").json()["id"]
+        client.post(f"/api/sessions/{session_id}/chat", json={"message": "У какой марки больше всего хрома?"})
+        answer = client.get(f"/api/sessions/{session_id}").json()["messages"][1]
+        assert answer["verification"] is None
+        url = f"/api/sessions/{session_id}/messages/{answer['id']}/verify"
+        body = client.post(url).json()
+        assert (body["verification"]["verdict"], body["verification"]["percent"]) == ("подтверждён", 100)
+        assert "У какой марки больше всего хрома?" in json.dumps(provider.requests[0], ensure_ascii=False)
+        saved = client.get(f"/api/sessions/{session_id}").json()
+        assert saved["messages"][1]["verification"]["claims"] == body["verification"]["claims"]
+        assert saved["usage"]["total_tokens"] == body["session_usage"]["total_tokens"] == 20
+        again = client.post(url).json()  # повторная проверка заменяет вердикт, но расход копится
+        assert again["session_usage"]["total_tokens"] == 40
+        assert client.get(f"/api/sessions/{session_id}").json()["usage"]["total_tokens"] == 40
+
+
+def test_verify_rejects_wrong_targets_without_calling_the_model(tmp_path):
+    from fastapi.testclient import TestClient
+    app = make_app(tmp_path)
+    app.state.agent_factory = scripted_agent([("Здравствуйте! Спросите о сплавах.", [])])
+    provider = Provider(verdict_reply([]))
+    with_verifier(app, provider)
+    with TestClient(app) as client:
+        session_id = client.post("/api/sessions").json()["id"]
+        client.post(f"/api/sessions/{session_id}/chat", json={"message": "Привет"})
+        user, answer = client.get(f"/api/sessions/{session_id}").json()["messages"]
+        other = client.post("/api/sessions").json()["id"]
+        assert client.post(f"/api/sessions/{other}/messages/{answer['id']}/verify").status_code == 404
+        assert client.post(f"/api/sessions/{session_id}/messages/{user['id']}/verify").status_code == 404
+        assert client.post(f"/api/sessions/missing/messages/{answer['id']}/verify").status_code == 404
+        no_data = client.post(f"/api/sessions/{session_id}/messages/{answer['id']}/verify")
+        assert no_data.status_code == 422 and "нет данных" in no_data.json()["detail"]
+        lock = asyncio.Lock()
+        asyncio.run(lock.acquire())  # как будто в диалоге идёт ответ
+        app.state.locks[session_id] = lock
+        assert client.post(f"/api/sessions/{session_id}/messages/{answer['id']}/verify").status_code == 409
+    assert not provider.requests
