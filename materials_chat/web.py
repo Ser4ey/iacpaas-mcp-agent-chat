@@ -264,9 +264,21 @@ def create_app(settings=None) -> FastAPI:
 
     static = Path(__file__).parent / "static"
     if static.is_dir():
-        app.mount("/static", StaticFiles(directory=str(static)), name="static")
+        app.mount("/static", RevalidatedStaticFiles(directory=str(static)), name="static")
 
         @app.get("/")
         async def homepage():
-            return FileResponse(static / "index.html")
+            return FileResponse(static / "index.html", headers={"Cache-Control": "no-cache"})
     return app
+
+
+class RevalidatedStaticFiles(StaticFiles):
+    """Браузер сверяет файлы интерфейса с сервером (ответ 304, если не менялись).
+
+    Без этого после обновления приложения стили и скрипты берутся из кэша браузера.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response

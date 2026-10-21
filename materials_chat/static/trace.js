@@ -5,12 +5,15 @@
  */
 import { formatDuration, plural } from './format.js';
 
-// Откуда пришли данные (meta.served_from).
+// Откуда пришли данные (meta.served_from): подпись и вид метки.
 const SOURCE_LABELS = {
-  iacpaas_live: 'IACPaaS',
-  local_index: 'индекс',
-  local_index_fallback: 'индекс — платформа недоступна',
+  iacpaas_live: ['IACPaaS', 'is-live'],
+  local_index: ['индекс', 'is-index'],
+  local_index_fallback: ['индекс — платформа недоступна', 'is-fallback'],
 };
+
+// Части JSON для подсветки: строка (ключ, если за ней двоеточие), литерал, число.
+const JSON_TOKEN = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
 
 // Что делает агент, пока инструмент выполняется (строка статуса под журналом).
 const TOOL_ACTIVITY = {
@@ -134,9 +137,25 @@ function label(text) {
 
 function jsonBlock(value) {
   const pre = document.createElement('pre');
-  pre.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  if (typeof value === 'string') pre.textContent = value;
+  else pre.append(...highlightJson(JSON.stringify(value, null, 2)));
   pre.tabIndex = 0; // прокручивается с клавиатуры
   return pre;
+}
+
+/** Подсветка JSON: только текстовые узлы и span, данные не разбираются как HTML. */
+function highlightJson(text) {
+  const parts = [];
+  let last = 0;
+  for (const match of text.matchAll(JSON_TOKEN)) {
+    if (match.index > last) parts.push(text.slice(last, match.index));
+    const [token, string, colon, literal] = match;
+    if (string && colon) parts.push(span('json-key', string), colon);
+    else parts.push(span(string ? 'json-string' : literal ? 'json-literal' : 'json-number', token));
+    last = match.index + token.length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
 }
 
 function span(className, text) {
@@ -170,9 +189,9 @@ function sourceLabel(result) {
     const values = new Set(meta.sources.map((source) => source.served_from));
     if (values.size === 1) [servedFrom] = values;
   }
-  const text = SOURCE_LABELS[servedFrom];
+  const [text, kind] = SOURCE_LABELS[servedFrom] ?? [];
   if (!text) return null;
-  const node = span('tool-source', text);
+  const node = span(`tool-source ${kind}`, text);
   if (meta.live_error) node.title = `Платформа: ${meta.live_error}`;
   return node;
 }

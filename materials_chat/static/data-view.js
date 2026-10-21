@@ -74,7 +74,7 @@ export function renderIndexStatus(container, status, { requested, onRefresh }) {
 
   const summary = el('p', 'index-summary');
   const state = busy ? 'Индекс обновляется' : index.ready ? 'Индекс готов' : 'Индекс не загружен';
-  summary.append(el('strong', '', state));
+  summary.append(el('strong', busy ? 'is-busy' : index.ready ? 'is-ready' : 'is-empty', state));
   const facts = [
     index.total_resources != null && `${index.resources_indexed ?? 0} из ${plural(index.total_resources, ['ресурса', 'ресурсов', 'ресурсов'])}`,
     typeof index.nodes === 'number' && plural(index.nodes, ['вершина', 'вершины', 'вершин']),

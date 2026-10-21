@@ -1,11 +1,14 @@
-"""RouterAI environment aliases and compatible streaming API; no paid requests."""
+"""RouterAI: имена настроек, модель LangChain и каталог моделей; платных запросов нет."""
 import json
 
 import httpx
+import httpx2
+import openai
 import pytest
+from langchain_core.exceptions import ContextOverflowError
 
 from materials_chat.config import Settings
-from materials_chat.openrouter import OpenRouterClient, ProviderError, fetch_model_info
+from materials_chat.openrouter import ProviderError, as_provider_error, create_chat_model, fetch_model_info
 
 
 def test_routerai_env_names_are_loaded_without_disclosing_key(tmp_path):
@@ -32,31 +35,46 @@ def test_legacy_openrouter_config_stays_compatible():
 
 
 @pytest.mark.asyncio
-async def test_routerai_receives_streaming_tools_and_returns_usage(monkeypatch):
-    actual_client = httpx.AsyncClient
+async def test_routerai_model_receives_key_tools_and_returns_provider_usage():
     def handle(request):
         assert str(request.url) == "https://routerai.ru/api/v1/chat/completions"
         assert request.headers["Authorization"] == "Bearer local-test"
+        assert request.headers["X-Title"] == "IACPaaS Materials Study"
         body = json.loads(request.content)
         assert body["model"] == "deepseek/deepseek-v4.1-flash"
         assert body["stream"] and body["tools"] and body["tool_choice"] == "required"
-        payload = {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call1", "function": {"name": "search_graph", "arguments": "{}"}}]}, "finish_reason": "tool_calls"}],
-                   "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16}}
-        return httpx.Response(200, text="data: " + json.dumps(payload) + "\n\ndata: [DONE]\n\n", headers={"Content-Type": "text/event-stream"})
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: actual_client(transport=httpx.MockTransport(handle), **kwargs))
+        payload = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": body["model"],
+                   "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{"index": 0, "id": "call1", "type": "function",
+                                "function": {"name": "search_graph", "arguments": "{}"}}]}, "finish_reason": "tool_calls"}],
+                   "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16, "cost": 0.01}}
+        return httpx2.Response(200, text="data: " + json.dumps(payload) + "\n\ndata: [DONE]\n\n",
+                               headers={"Content-Type": "text/event-stream"})
+
     settings = Settings(_env_file=None, ROUTERAI_API_KEY="local-test", ROUTERAI_MODEL="deepseek/deepseek-v4.1-flash")
-    chunks = [chunk async for chunk in OpenRouterClient(settings).stream([], [{"type": "function", "function": {"name": "search_graph"}}], "required")]
-    assert chunks[0]["usage"]["total_tokens"] == 16
-    assert chunks[1]["delta"]["tool_calls"][0]["function"]["name"] == "search_graph"
+    model = create_chat_model(settings, http_async_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handle)))
+    tool = {"type": "function", "function": {"name": "search_graph", "parameters": {"type": "object", "properties": {}}}}
+    chunks = [chunk async for chunk in model.bind_tools([tool], tool_choice="required").astream("Вопрос")]
+    message = chunks[0]
+    for chunk in chunks[1:]:
+        message += chunk
+    assert message.tool_calls[0]["name"] == "search_graph"
+    assert message.response_metadata["provider_usage"]["cost"] == 0.01
 
 
 @pytest.mark.asyncio
-async def test_routerai_error_names_current_provider_not_previous_one(monkeypatch):
-    actual_client = httpx.AsyncClient
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: actual_client(transport=httpx.MockTransport(lambda _: httpx.Response(401)), **kwargs))
+async def test_routerai_error_names_current_provider_not_previous_one():
     settings = Settings(_env_file=None, ROUTERAI_API_KEY="local-test", ROUTERAI_MODEL="model")
-    with pytest.raises(ProviderError, match="Ключ RouterAI отклонён"):
-        _ = [chunk async for chunk in OpenRouterClient(settings).stream([], [])]
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(lambda _: httpx2.Response(401, json={"error": {}})))
+    with pytest.raises(openai.AuthenticationError) as error:
+        await create_chat_model(settings, http_async_client=client, max_retries=0).ainvoke("Вопрос")
+    problem = as_provider_error(error.value, settings.provider_name)
+    assert str(problem) == "Ключ RouterAI отклонён." and problem.code == "http_401"
+
+
+def test_missing_key_is_named_in_the_error():
+    with pytest.raises(ProviderError, match="ROUTERAI_API_KEY") as error:
+        create_chat_model(Settings(_env_file=None, ROUTERAI_API_KEY="", ROUTERAI_MODEL="model", ROUTERAI_BASE_URL="https://routerai.ru/api/v1"))
+    assert error.value.code == "missing_api_key"
 
 
 @pytest.mark.asyncio
@@ -90,3 +108,8 @@ async def test_unreachable_catalog_leaves_prices_unknown(monkeypatch):
         transport=httpx.MockTransport(lambda _: httpx.Response(503)), **kwargs))
     info = await fetch_model_info(Settings(_env_file=None, ROUTERAI_API_KEY="local-test", ROUTERAI_MODEL="m"))
     assert info["source"] == "unknown" and info["price_input_per_million"] is None
+
+
+def test_context_overflow_reported_by_provider_has_its_own_code():
+    problem = as_provider_error(ContextOverflowError("prompt is too long"), "RouterAI")
+    assert problem.code == "context_limit" and "окно контекста" in str(problem)

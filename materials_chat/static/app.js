@@ -415,7 +415,10 @@ function createAnswerView(turn) {
   const body = el('div', 'answer-body prose');
   const errors = el('div', 'answer-errors');
   const meta = el('div', 'answer-meta');
-  root.append(log, status, body, errors, meta);
+  // Текст, ошибки и строка расхода — одна карточка под журналом инструментов.
+  const card = el('div', 'answer-card');
+  card.append(body, errors, meta);
+  root.append(log, status, card);
   turn.append(root);
   return {
     root, status, body, errors, meta,
