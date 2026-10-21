@@ -141,7 +141,7 @@ class SessionStore:
                                      json.dumps(model_messages or [{"role": "assistant", "content": answer}], ensure_ascii=False),
                                      None if grounded is None else int(grounded),
                                      json.dumps(error, ensure_ascii=False) if error else None,
-                                     json.dumps(number_check, ensure_ascii=False) if number_check else None))
+                                     json.dumps(number_check, ensure_ascii=False) if number_check is not None else None))
             self.db.execute("UPDATE sessions SET title=CASE WHEN title='Новый диалог' THEN ? ELSE title END,updated_at=? WHERE id=?",
                             (user[:70], timestamp, session_id))
         return assistant_id

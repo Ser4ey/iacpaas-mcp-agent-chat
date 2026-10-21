@@ -229,12 +229,18 @@ def create_app(settings=None) -> FastAPI:
                         result.model_messages.append({"role": "assistant", "content": content})
                     grounded = any(not item.get("is_error") for item in result.trace)
                     # Числа ответа сверяются с данными этого хода и прошлых ходов диалога.
-                    number_check = check_numbers(content, text, [*store.traces(session_id), *result.trace])
+                    # Сверка справочная: её сбой не должен терять ход и подменять исходную ошибку.
+                    try:
+                        number_check = check_numbers(content, text, [*store.traces(session_id), *result.trace])
+                    except Exception:
+                        log.exception("Сверка чисел ответа не удалась")
+                        number_check = None
                     message_id = store.save_turn(session_id, text, content, result.trace, result.usage,
                                                  result.model_messages, grounded, problem, number_check)
                 if error:
                     yield sse("error", error)
-                yield sse("number_check", number_check)
+                if number_check is not None:
+                    yield sse("number_check", number_check)
                 updated = store.get(session_id)
                 yield sse("usage", {"turn": runner.result.usage, "session": updated["usage"],
                                     "context_tokens": updated["context_tokens"], "context_budget": budget(),

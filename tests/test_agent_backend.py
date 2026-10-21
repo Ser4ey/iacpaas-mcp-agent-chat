@@ -497,3 +497,22 @@ def test_number_check_uses_this_and_earlier_turns(tmp_path):
         assert dict(second)["number_check"] == {"status": "checked", "checked": 2, "confirmed": 2, "unconfirmed": []}
         saved = client.get(f"/api/sessions/{session_id}").json()["messages"]
         assert saved[1]["number_check"] == dict(first)["number_check"] and saved[0]["number_check"] is None
+
+
+def test_number_check_failure_does_not_lose_the_turn(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    def boom(*_args):
+        raise RuntimeError("сбой сверки")
+
+    monkeypatch.setattr("materials_chat.web.check_numbers", boom)
+    app = make_app(tmp_path)
+    app.state.agent_factory = scripted_agent([("Ответ 42.", [])])
+    with TestClient(app) as client:
+        session_id = client.post("/api/sessions").json()["id"]
+        events = stream_events(client.post(f"/api/sessions/{session_id}/chat", json={"message": "Вопрос"}).text)
+        names = [name for name, _ in events]
+        assert names[-1] == "done" and "number_check" not in names
+        saved = client.get(f"/api/sessions/{session_id}").json()["messages"]
+        assert [m["role"] for m in saved] == ["user", "assistant"]
+        assert saved[1]["number_check"] is None
