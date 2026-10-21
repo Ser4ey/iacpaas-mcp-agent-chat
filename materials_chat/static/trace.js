@@ -23,6 +23,7 @@ const TOOL_ACTIVITY = {
   list_inforesources: 'Смотрит список ресурсов',
   count_graph: 'Считает вершины',
   validate_resource: 'Проверяет структуру ресурса',
+  find_materials: 'Подбирает марки по составу',
 };
 
 const NODES = ['вершина', 'вершины', 'вершин'];
@@ -192,7 +193,10 @@ function sourceLabel(result) {
   const [text, kind] = SOURCE_LABELS[servedFrom] ?? [];
   if (!text) return null;
   const node = span(`tool-source ${kind}`, text);
-  if (meta.live_error) node.title = `Платформа: ${meta.live_error}`;
+  // live_error — объект {code, message}; в старых сохранённых диалогах это строка.
+  const liveError = meta.live_error;
+  const liveText = typeof liveError === 'string' ? liveError : liveError?.message ?? liveError?.code;
+  if (liveText) node.title = `Платформа: ${liveText}`;
   return node;
 }
 
@@ -213,11 +217,30 @@ function describeArguments(name, args) {
       return resource;
     case 'list_inforesources':
       return args.filter ? `«${args.filter}»` : 'все ресурсы';
+    case 'find_materials':
+      return describeComposition(args);
     default: {
       const text = JSON.stringify(args);
       return text === '{}' ? '' : text;
     }
   }
+}
+
+const OP_SIGNS = { '>=': '≥', '<=': '≤' };
+
+/** Условия по составу, класс и сортировка: «Cr > 20 · нет Ni · Сплавы на основе железа». */
+function describeComposition(args) {
+  const conditions = (Array.isArray(args.conditions) ? args.conditions : []).map(describeCondition);
+  const sort = args.sort_by && (args.order === 'asc' ? `по возрастанию ${args.sort_by}` : `топ по ${args.sort_by}`);
+  return [...conditions, args.material_class, sort].filter(Boolean).join(' · ');
+}
+
+function describeCondition({ element, op, value, include_unlisted: unlisted } = {}) {
+  if (!element) return '';
+  if (op === 'present') return `есть ${element}`;
+  if (op === 'absent') return `нет ${element}`;
+  const text = `${element} ${OP_SIGNS[op] ?? op} ${value}`;
+  return unlisted ? `${text} (и без элемента)` : text;
 }
 
 /** Итог вызова одной фразой: «24 совпадения», «40 вершин». */
@@ -239,6 +262,10 @@ function describeResult(name, result) {
     case 'validate_resource':
       if (typeof data.valid !== 'boolean') return '';
       return data.valid ? 'структура в порядке' : plural(data.issues?.length ?? 0, ['замечание', 'замечания', 'замечаний']);
+    case 'find_materials':
+      if (typeof data.total !== 'number') return '';
+      return (data.total ? plural(data.total, ['марка', 'марки', 'марок']) : 'нет марок')
+        + (data.has_more ? ', есть ещё' : '');
     default:
       return '';
   }
