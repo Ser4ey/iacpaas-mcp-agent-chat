@@ -138,6 +138,7 @@
   },
   "suggested_questions": [
     {"text": "Какой химический состав у стали 12Х18Н10Т?", "resources": ["materials"]},
+    {"text": "Какие марки содержат больше 20 % хрома?", "resources": ["materials"]},
     {"text": "Какая плотность у сплава АМг3?", "resources": ["materials"]},
     {"text": "Какие марки относятся к классу «Бронзы»?", "resources": ["materials"]},
     {"text": "Какие механические свойства перечислены в базе свойств материалов?", "resources": ["properties"]},

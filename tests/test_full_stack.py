@@ -128,6 +128,8 @@ async def test_http_chat_really_uses_mcp_and_counts_all_model_requests(tmp_path,
         assert saved["messages"][-1]["content"] == answer_text
         assert saved["messages"][-1]["grounded"] is True
         assert [body["tool_choice"] for body in requests] == ["auto", "auto"]
+        tools = {tool["function"]["name"]: tool["function"] for tool in requests[0]["tools"]}
+        assert "include_unlisted" in json.dumps(tools["find_materials"]["parameters"], ensure_ascii=False)
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ import logging
 
 from mcp.server.fastmcp import FastMCP
 
+from .composition import Condition
 from .config import Settings, get_settings
 from .service import GraphService, ToolResult
 
@@ -33,9 +34,35 @@ def create_server(settings: Settings | None = None) -> FastMCP:
     async def search_graph(query: str, resource_id: str | None = None, limit: int = 8, offset: int = 0) -> ToolResult:
         """Лексический поиск по локальному индексу данных IACPaaS (у платформы нет поиска по тексту).
         Ищите короткими терминами/марками. Возвращает node_id, фрагменты, total и has_more.
+        limit — до 20 (по умолчанию 8). Поиск идёт по полной копии ресурсов, поэтому has_more: false
+        значит «найдено всё по этому запросу»; при has_more продолжайте с next_offset.
         Отсутствие совпадения относится только к указанному охвату и состоянию индекса.
         """
         return await asyncio.to_thread(service.search_graph, query, resource_id, limit, offset)
+
+    @mcp.tool()
+    async def find_materials(conditions: list[Condition] | None = None, material_class: str | None = None,
+                             sort_by: str | None = None, order: str = "desc", limit: int = 20,
+                             offset: int = 0) -> ToolResult:
+        """Подбор марок справочника по химическому составу: пороги («больше/меньше X %»), топ,
+        максимум или минимум по элементу (sort_by + limit), есть или нет элемента, класс материалов.
+        Количество подходящих марок — total. Все conditions соединяются через «И»; для «или»
+        делайте несколько вызовов.
+        Сравнение гарантированное: «>» X — нижняя граница диапазона больше X, «<» X — верхняя меньше X
+        («не более 0.5» — это диапазон [0; 0.5]). op present — элемент перечислен в любой форме,
+        включая «не более»; гарантированное присутствие — op ">" и value 0.
+        include_unlisted у «<» и «<=» добавляет марки, в составе которых элемент не указан
+        («где никеля меньше 1 %»). sort_by подразумевает, что элемент в составе есть: sort_by по тому же
+        элементу, что и «<»/«<=» с include_unlisted, отбросит марки без него; для «меньше всего X, включая
+        марки без X» sort_by по этому элементу не ставьте.
+        elements_not_in_compositions — элементы, которые не встречаются ни в одном составе.
+        Источник — локальный снимок (indexed_at). Запись марки читается через
+        get_subgraph(resource_id="materials", root=node_id, depth=8, max_nodes=150).
+        limit 1–50; при has_more продолжайте с next_offset.
+        """
+        return await asyncio.to_thread(
+            service.find_materials, [item.model_dump() for item in conditions or []],
+            material_class, sort_by, order, limit, offset)
 
     @mcp.tool()
     async def get_subgraph(resource_id: str, root: str, depth: int = 3, max_nodes: int = 80, offset: int = 0) -> ToolResult:

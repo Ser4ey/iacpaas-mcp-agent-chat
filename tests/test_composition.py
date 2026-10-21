@@ -294,3 +294,31 @@ def test_page_fits_the_result_budget(service):
     assert result.ok and result.data["has_more"] and result.data["total"] == 5
     assert result.data["next_offset"] == len(result.data["materials"]) < 5
     assert len(json.dumps(result.model_dump(), ensure_ascii=False)) <= 1500
+
+
+from materials_chat.mcp_server import create_server
+from materials_chat.prompts import SYSTEM_PROMPT
+
+
+async def test_mcp_lists_find_materials_with_its_rules(tmp_path):
+    settings = make_service(tmp_path).settings
+    tools = {tool.name: tool for tool in await create_server(settings).list_tools()}
+    assert len(tools) == 7
+    assert {"conditions", "material_class", "sort_by", "order", "limit", "offset"} <= \
+        set(tools["find_materials"].inputSchema["properties"])
+    assert "include_unlisted" in json.dumps(tools["find_materials"].inputSchema, ensure_ascii=False)
+    description = tools["find_materials"].description
+    assert "get_subgraph" in description and "include_unlisted" in description and "next_offset" in description
+    assert "до 20" in tools["search_graph"].description and "has_more: false" in tools["search_graph"].description
+
+
+async def test_mcp_find_materials_returns_the_envelope(tmp_path):
+    settings = make_service(tmp_path).settings
+    _, structured = await create_server(settings).call_tool(
+        "find_materials", {"conditions": [{"element": "Cr", "op": ">", "value": 20}], "sort_by": "Cr"})
+    assert structured["ok"] and [item["name"] for item in structured["data"]["materials"]] == ["Х25", "Х21"]
+
+
+def test_prompt_routes_composition_questions_to_find_materials():
+    assert "find_materials" in SYSTEM_PROMPT and "has_more: false" in SYSTEM_PROMPT
+    assert "заполнено у N записей" in SYSTEM_PROMPT
