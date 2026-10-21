@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .agent import Agent, context_budget
+from .answer_check import check_numbers
 from .openrouter import ProviderError, fetch_model_info
 from .sessions import SessionStore
 
@@ -227,10 +228,13 @@ def create_app(settings=None) -> FastAPI:
                         content = "Модель не вернула ответ. Попробуйте уточнить запрос."
                         result.model_messages.append({"role": "assistant", "content": content})
                     grounded = any(not item.get("is_error") for item in result.trace)
+                    # Числа ответа сверяются с данными этого хода и прошлых ходов диалога.
+                    number_check = check_numbers(content, text, [*store.traces(session_id), *result.trace])
                     message_id = store.save_turn(session_id, text, content, result.trace, result.usage,
-                                                 result.model_messages, grounded, problem)
+                                                 result.model_messages, grounded, problem, number_check)
                 if error:
                     yield sse("error", error)
+                yield sse("number_check", number_check)
                 updated = store.get(session_id)
                 yield sse("usage", {"turn": runner.result.usage, "session": updated["usage"],
                                     "context_tokens": updated["context_tokens"], "context_budget": budget(),

@@ -369,6 +369,7 @@ def test_old_history_database_is_migrated(tmp_path):
     store.model_info = PRICES
     detail = store.get("s")
     assert detail["messages"][0]["grounded"] is None
+    assert detail["messages"][0]["number_check"] is None
     assert detail["usage"]["cost"] == pytest.approx(5.0)
     store.close()
 
@@ -442,3 +443,57 @@ def test_web_stream_saves_trace_grounding_and_hides_internal_reasoning(tmp_path)
         assert detail["messages"][1]["trace"][0]["name"] == "search_graph"
         assert detail["messages"][1]["grounded"] is True
         assert "private_internal" not in json.dumps(detail)
+
+
+def make_app(tmp_path):
+    from materials_chat.config import Settings
+    from materials_chat.web import create_app
+    # Адрес провайдера недоступен: тест не ходит в сеть за каталогом моделей.
+    return create_app(Settings(_env_file=None, data_dir=tmp_path, history_path=tmp_path / "history.sqlite3",
+                               auto_sync_on_start=False, openrouter_api_key="test-fake-never-sent",
+                               openrouter_model="fake", openrouter_base_url="http://127.0.0.1:9"))
+
+
+def scripted_agent(turns):
+    """Подменяет Agent: каждый вызов отдаёт следующий заданный ход (текст ответа и журнал)."""
+    from materials_chat.agent import TurnResult
+    queue = list(turns)
+
+    class ScriptedAgent:
+        def __init__(self, _settings, model_info=None):
+            self.result = TurnResult()
+
+        async def run(self, text, history):
+            self.result.content, self.result.trace = queue.pop(0)
+            self.result.model_messages = [{"role": "assistant", "content": self.result.content}]
+            yield "answer_delta", {"text": self.result.content}
+
+    return ScriptedAgent
+
+
+def stream_events(text):
+    events = []
+    for block in text.strip().split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in block.splitlines())
+        events.append((lines["event"], json.loads(lines["data"])))
+    return events
+
+
+def test_number_check_uses_this_and_earlier_turns(tmp_path):
+    from fastapi.testclient import TestClient
+    data = [{"id": "t", "name": "search_graph", "arguments": {"query": "хром"}, "is_error": False,
+             "result": {"ok": True, "data": {"hits": [{"label": "Cr", "value": "17.0–19.0 %"}]}}}]
+    app = make_app(tmp_path)
+    app.state.agent_factory = scripted_agent([("Хром 17–19 %, плотность 9500.", data),
+                                              ("Напомню: хром 17–19 %.", [])])
+    with TestClient(app) as client:
+        session_id = client.post("/api/sessions").json()["id"]
+        first = stream_events(client.post(f"/api/sessions/{session_id}/chat", json={"message": "Хром?"}).text)
+        names = [name for name, _ in first]
+        assert names.index("number_check") < names.index("usage")
+        assert dict(first)["number_check"] == {"status": "checked", "checked": 3, "confirmed": 2, "unconfirmed": ["9500"]}
+        second = stream_events(client.post(f"/api/sessions/{session_id}/chat", json={"message": "Повтори"}).text)
+        # Ответ опирается на данные прошлого хода — числа подтверждены.
+        assert dict(second)["number_check"] == {"status": "checked", "checked": 2, "confirmed": 2, "unconfirmed": []}
+        saved = client.get(f"/api/sessions/{session_id}").json()["messages"]
+        assert saved[1]["number_check"] == dict(first)["number_check"] and saved[0]["number_check"] is None

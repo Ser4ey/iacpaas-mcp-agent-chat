@@ -51,13 +51,15 @@ class SessionStore:
             content TEXT NOT NULL, created_at TEXT NOT NULL, trace TEXT NOT NULL,
             usage TEXT NOT NULL, model_messages TEXT NOT NULL);
         """)
-        # Миграция: признак «ответ опирается на данные инструментов» и ошибка хода
-        # (отдельно от текста ответа) появились позже.
+        # Миграция: признак «ответ опирается на данные инструментов», ошибка хода
+        # (отдельно от текста ответа) и сверка чисел появились позже.
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(messages)")}
         if "grounded" not in columns:
             self.db.execute("ALTER TABLE messages ADD COLUMN grounded INTEGER")
         if "error" not in columns:
             self.db.execute("ALTER TABLE messages ADD COLUMN error TEXT")
+        if "number_check" not in columns:
+            self.db.execute("ALTER TABLE messages ADD COLUMN number_check TEXT")
         self.db.commit()
 
     def create(self) -> dict:
@@ -80,6 +82,7 @@ class SessionStore:
             message["usage"] = with_cost(message["usage"], self.model_info)
             message["grounded"] = None if message["grounded"] is None else bool(message["grounded"])
             message["error"] = json.loads(message["error"]) if message["error"] else None
+            message["number_check"] = json.loads(message["number_check"]) if message["number_check"] else None
             usage = add_usage(usage, message["usage"])
             message.pop("session_id")
             message.pop("model_messages")
@@ -111,23 +114,34 @@ class SessionStore:
             result.extend(stored)
         return result
 
+    def traces(self, session_id: str) -> list[dict]:
+        """Записи журнала инструментов всех ответов диалога по порядку: данные для сверки чисел."""
+        with self._lock:
+            rows = self.db.execute("SELECT trace FROM messages WHERE session_id=? AND role='assistant' ORDER BY rowid",
+                                   (session_id,)).fetchall()
+        return [entry for row in rows for entry in json.loads(row["trace"])]
+
     def save_turn(self, session_id: str, user: str, answer: str, trace: list, usage: dict,
                   model_messages: list | None = None, grounded: bool | None = None,
-                  error: dict | None = None) -> str:
-        """error — {"message", "code"}: остановка или сбой хода, хранится отдельно от текста ответа."""
+                  error: dict | None = None, number_check: dict | None = None) -> str:
+        """error — {"message", "code"}: остановка или сбой хода, хранится отдельно от текста ответа.
+
+        number_check — результат сверки чисел ответа с данными инструментов (answer_check.check_numbers).
+        """
         assistant_id = uuid.uuid4().hex
         timestamp = now()
         insert = ("INSERT INTO messages (id, session_id, role, content, created_at, trace, usage, "
-                  "model_messages, grounded, error) VALUES (?,?,?,?,?,?,?,?,?,?)")
+                  "model_messages, grounded, error, number_check) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
         with self._lock, self.db:
             # The user and assistant appear together; interrupted tool exchanges
             # never leave an invalid tool_call without a corresponding result.
-            self.db.execute(insert, (uuid.uuid4().hex, session_id, "user", user, timestamp, "[]", "{}", "[]", None, None))
+            self.db.execute(insert, (uuid.uuid4().hex, session_id, "user", user, timestamp, "[]", "{}", "[]", None, None, None))
             self.db.execute(insert, (assistant_id, session_id, "assistant", answer, timestamp,
                                      json.dumps(trace, ensure_ascii=False), json.dumps(usage),
                                      json.dumps(model_messages or [{"role": "assistant", "content": answer}], ensure_ascii=False),
                                      None if grounded is None else int(grounded),
-                                     json.dumps(error, ensure_ascii=False) if error else None))
+                                     json.dumps(error, ensure_ascii=False) if error else None,
+                                     json.dumps(number_check, ensure_ascii=False) if number_check else None))
             self.db.execute("UPDATE sessions SET title=CASE WHEN title='Новый диалог' THEN ? ELSE title END,updated_at=? WHERE id=?",
                             (user[:70], timestamp, session_id))
         return assistant_id
