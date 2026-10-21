@@ -141,8 +141,41 @@ async def test_depth_zero_is_only_the_requested_node(service):
     assert result.data["edges"] == []
 
 
+async def test_unread_children_are_marked_and_a_deep_record_is_read_at_once(service):
+    record = {
+        "title": "Записи", "id": 1, "name": "Записи", "type": "КОРЕНЬ", "json_type": "universal",
+        "ontology": "Тестовая онтология$;", "successors": [
+            {"id": 2, "name": "Марка", "type": "НЕТЕРМИНАЛ", "successors": [
+                {"id": 3, "name": "Состав", "type": "НЕТЕРМИНАЛ", "successors": [
+                    {"id": 4, "name": "1", "type": "НЕТЕРМИНАЛ", "successors": [
+                        {"id": 5, "name": "Cr", "type": "НЕТЕРМИНАЛ", "successors": [
+                            {"id": 6, "name": "Числовой интервал", "type": "НЕТЕРМИНАЛ", "successors": [
+                                {"id": 7, "name": "Нижняя граница", "type": "НЕТЕРМИНАЛ", "successors": [
+                                    {"id": 8, "value": "17.0", "type": "ТЕРМИНАЛ-ЗНАЧЕНИЕ"}]}]}]}]}]},
+                {"id": 9, "name": "Стандарт", "type": "НЕТЕРМИНАЛ"}]}],
+    }
+    service.store.import_graph("materials", record)
+    shallow = await service.get_subgraph("materials", "2", depth=1)
+    marks = {node["node_id"]: node.get("children_not_loaded") for node in shallow.data["nodes"]}
+    assert marks == {"2": None, "3": 1, "9": None}  # «Стандарт» — лист, перечитывать нечего
+
+    whole = await service.get_subgraph("materials", "2", depth=8)
+    assert whole.ok and "8" in {node["node_id"] for node in whole.data["nodes"]}
+    assert not any("children_not_loaded" in node for node in whole.data["nodes"])
+
+
+def test_search_meta_lists_only_resources_with_hits(service):
+    service.store.import_graph("other", {"title": "Другая база", "id": 50, "name": "Другая база", "type": "КОРЕНЬ",
+                                         "json_type": "universal", "successors": [{"id": 51, "name": "Медь"}]})
+    result = service.search_graph("Алюминий")
+    assert result.ok and result.data["coverage_complete"]
+    assert result.meta["sources"] == [{"resource_id": "materials",
+                                       "indexed_at": service.store.resource("materials")["indexed_at"]}]
+    assert result.meta["indexed_at"] == min(service.store.resource(item)["indexed_at"] for item in ("materials", "other"))
+
+
 @pytest.mark.parametrize("arguments", [
-    {"depth": 6}, {"depth": -1}, {"max_nodes": 100000}, {"offset": -1},
+    {"depth": 9}, {"depth": -1}, {"max_nodes": 100000}, {"offset": -1},
 ])
 async def test_invalid_subgraph_limits_are_diagnostic(service, arguments):
     result = await service.get_subgraph("materials", "1", **arguments)
@@ -268,7 +301,7 @@ async def test_failed_refresh_keeps_old_snapshot_and_reports_error(service):
     result = service.search_graph("Алюминий", "materials")
     assert result.ok and result.data["hits"]
     assert result.meta["sources"][0]["last_sync_error"] == "Тестовая ошибка сети"
-    assert result.meta["sources"][0]["served_from"] == "local_index"
+    assert result.meta["served_from"] == "local_index"
 
 
 async def test_broken_resource_does_not_stop_the_whole_refresh(service):

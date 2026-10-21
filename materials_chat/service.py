@@ -20,6 +20,9 @@ from .platform import PlatformClient, PlatformError, concept_path, utc_now
 
 log = logging.getLogger(__name__)
 
+# Самая глубокая запись марки — 7 уровней от вершины марки: любая запись читается одним вызовом.
+MAX_DEPTH = 8
+
 
 class ResourceDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -262,7 +265,7 @@ class GraphService:
         if not 1 <= limit <= 20 or not 0 <= offset <= 10000:
             return fail("LIMIT_EXCEEDED", "Допустимы limit 1–20 и offset 0–10000.")
         ids = [resource_id] if resource_id else list(self.allowed)
-        indexed_ids, sources, unavailable = [], [], []
+        indexed_ids, snapshots, unavailable = [], {}, []
         for item_id in ids:
             definition, indexed, error = self._ready(item_id)
             if error:
@@ -271,7 +274,7 @@ class GraphService:
                 unavailable.append(item_id)
             else:
                 indexed_ids.append(item_id)
-                sources.append(self._metadata(definition, indexed))
+                snapshots[item_id] = indexed
         if not indexed_ids:
             return fail("INDEX_NOT_READY", "Поисковый индекс пуст. Запустите синхронизацию с IACPaaS.", True)
         found = self.store.search(query, indexed_ids, limit, offset)
@@ -287,12 +290,22 @@ class GraphService:
                 break
             hits.append(node)
             used += size
+        # Только ресурсы с найденными вершинами и дата их снимка: полные метаданные всех
+        # восьми ресурсов занимали больше половины ответа и уходили в модель с каждым поиском.
+        sources = []
+        for item_id in indexed_ids:
+            if any(hit["resource_id"] == item_id for hit in hits):
+                source = {"resource_id": item_id, "indexed_at": snapshots[item_id]["indexed_at"]}
+                if snapshots[item_id].get("last_error"):
+                    source["last_sync_error"] = snapshots[item_id]["last_error"]
+                sources.append(source)
         result = ToolResult(ok=True, data={"query": query, "hits": hits, "total": found["total"],
                 "match_mode": found["match_mode"], "limit": limit, "offset": offset,
                 "has_more": offset + len(hits) < found["total"],
                 "next_offset": offset + len(hits) if offset + len(hits) < found["total"] else None,
                 "coverage_complete": not unavailable, "unavailable_resources": unavailable},
-                meta={"sources": sources, "served_from": "local_index", "search_type": "lexical_prefix",
+                meta={"served_from": "local_index", "indexed_at": min(item["indexed_at"] for item in snapshots.values()),
+                      "sources": sources, "search_type": "lexical_prefix",
                       "no_match_scope": "only_indexed_resources", "result_size_limited": len(hits) < len(found["hits"])})
         return self._fit_result(result, "hits", offset)
 
@@ -300,8 +313,8 @@ class GraphService:
         definition, indexed, error = self._ready(resource_id)
         if error:
             return error
-        if not 0 <= depth <= 5 or not 1 <= max_nodes <= self.settings.max_result_nodes or not 0 <= offset <= 100000:
-            return fail("LIMIT_EXCEEDED", f"Допустимы depth 0–5, max_nodes 1–{self.settings.max_result_nodes}, offset 0–100000.")
+        if not 0 <= depth <= MAX_DEPTH or not 1 <= max_nodes <= self.settings.max_result_nodes or not 0 <= offset <= 100000:
+            return fail("LIMIT_EXCEEDED", f"Допустимы depth 0–{MAX_DEPTH}, max_nodes 1–{self.settings.max_result_nodes}, offset 0–100000.")
         try:
             # Индекс отвечает мгновенно: по нему проверяем вершину и размер фрагмента.
             data = await asyncio.to_thread(self.store.subgraph, resource_id, root, depth, max_nodes, offset)
@@ -311,12 +324,31 @@ class GraphService:
         if self.settings.live_reads:
             data, meta = await self._live_subgraph(definition, indexed, root, depth, max_nodes, offset, data, meta)
         data["nodes"] = [self._slim_node(self._bounded_node(node), node["node_id"] == data["root"]) for node in data["nodes"]]
+        counts = await asyncio.to_thread(self.store.child_counts, resource_id, [node["node_id"] for node in data["nodes"]])
+        self._mark_unloaded(data, counts)
         while len(json.dumps(data, ensure_ascii=False)) > self.settings.max_result_chars - 1000 and len(data["nodes"]) > 1:
             data["nodes"].pop()
             ids = {node["node_id"] for node in data["nodes"]}
             data["edges"] = [edge for edge in data["edges"] if edge["from"] in ids and edge["to"] in ids]
             data.update(truncated=True, has_more=True, next_offset=offset + len(data["nodes"]))
+            self._mark_unloaded(data, counts)
         return self._fit_result(ToolResult(ok=True, data=data, meta=meta), "nodes", offset)
+
+    @staticmethod
+    def _mark_unloaded(data: dict, counts: dict[str, int]):
+        """children_not_loaded — сколько потомков вершины не попало в выдачу (глубина или страница).
+
+        Без этого поля модель не отличит лист от вершины на границе глубины и перечитывает её.
+        """
+        shown: dict[str, set] = {}
+        for edge in data["edges"]:
+            shown.setdefault(edge["from"], set()).add(edge["to"])
+        for node in data["nodes"]:
+            missing = counts.get(node["node_id"], 0) - len(shown.get(node["node_id"], ()))
+            if missing > 0:
+                node["children_not_loaded"] = missing
+            else:
+                node.pop("children_not_loaded", None)
 
     async def _live_subgraph(self, definition, indexed, root, depth, max_nodes, offset, data, meta):
         """Тот же фрагмент, но прочитанный с платформы. При любой неудаче — данные индекса."""

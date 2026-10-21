@@ -165,6 +165,16 @@ class GraphStore:
             row = db.execute("SELECT * FROM nodes WHERE resource_id=? AND node_id=?", (resource_id, node_id)).fetchone()
         return self.node_dict(row) if row else None
 
+    def child_counts(self, resource_id: str, node_ids: list[str]) -> dict[str, int]:
+        """Сколько прямых потомков у каждой из вершин; у листьев записи нет."""
+        if not node_ids:
+            return {}
+        slots = ",".join("?" for _ in node_ids)
+        with self.connect() as db:
+            rows = db.execute(f"SELECT parent_id, count(*) FROM edges WHERE resource_id=? AND parent_id IN ({slots}) "
+                              "GROUP BY parent_id", [resource_id, *node_ids]).fetchall()
+        return {parent: count for parent, count in rows}
+
     def concept_labels(self, resource_id: str, node_id: str) -> list[str] | None:
         """Имена вершин от корня (без него) до node_id — так IACPaaS адресует вершину.
 

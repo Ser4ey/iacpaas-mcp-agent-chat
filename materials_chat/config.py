@@ -48,7 +48,8 @@ class Settings(BaseSettings):
     history_full_turns: int = Field(default=2, ge=0, le=20)
     history_tool_chars: int = Field(default=1500, ge=200, le=50000)
     max_result_nodes: int = Field(default=150, ge=1, le=300)
-    max_result_chars: int = Field(default=18000, ge=2000, le=50000)
+    # Самая большая запись марки (07ГФБ, 120 вершин) занимает около 19,5 тысячи символов.
+    max_result_chars: int = Field(default=22000, ge=2000, le=50000)
     # Живое чтение вершин и подграфов с IACPaaS (поиск всегда идёт по индексу).
     live_reads: bool = True
     live_max_nodes: int = Field(default=5000, ge=1)
