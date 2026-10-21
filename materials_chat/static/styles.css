@@ -1540,3 +1540,14 @@ svg {
     transition: none !important;
   }
 }
+
+/* Сверка чисел ответа с данными. Токены предупреждения переопределены в тёмной схеме выше. */
+.number-check.is-warning {
+  color: var(--warning);
+}
+
+mark.number-unconfirmed {
+  background: var(--warning-soft);
+  color: inherit;
+  border-radius: 3px;
+}

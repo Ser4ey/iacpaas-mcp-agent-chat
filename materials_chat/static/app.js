@@ -4,6 +4,7 @@
  * Модули:
  *   api.js       — запросы к серверу и чтение потока SSE;
  *   markdown.js  — безопасный рендер ответа модели (только DOM-узлы);
+ *   checks.js    — строка сверки чисел и подсветка ненайденных;
  *   trace.js     — журнал вызовов MCP-инструментов;
  *   data-view.js — раздел «Данные»;
  *   format.js    — числа, склонения, рубли, даты.
@@ -12,6 +13,7 @@
 import { api, streamChat } from './api.js';
 import { renderDataView, renderIndexStatus } from './data-view.js';
 import { formatCompact, formatCost, formatNumber, formatShortDate, plural } from './format.js';
+import { highlightNumbers, numberCheckNode } from './checks.js';
 import { renderMarkdown } from './markdown.js';
 import { ToolLog, normalizeTrace, toolActivity } from './trace.js';
 
@@ -426,6 +428,7 @@ function createAnswerView(turn) {
     content: '',
     usage: null,
     grounded: null,
+    numberCheck: null,
     truncated: false,
     done: false,
     renderQueued: false,
@@ -436,14 +439,16 @@ function showSavedAnswer(view, message) {
   view.content = message.content ?? '';
   view.usage = message.usage ?? null;
   view.grounded = message.grounded ?? null;
+  view.numberCheck = message.number_check ?? null;
   normalizeTrace(message.trace).forEach((call) => view.tools.update(call));
   renderMarkdown(view.body, view.content);
+  highlightNumbers(view.body, view.numberCheck?.unconfirmed ?? []);
   // Остановка или сбой хода хранятся отдельно от текста ответа (поле error).
   if (message.error?.message) addAnswerError(view, message.error.message, message.error.code === 'cancelled');
   renderAnswerMeta(view);
 }
 
-/** Тихая строка под ответом: токены · стоимость · «без обращения к базе» · Копировать. */
+/** Тихая строка под ответом: токены · стоимость · «без обращения к базе» · сверка чисел · Копировать. */
 function renderAnswerMeta(view) {
   const usage = view.usage ?? {};
   const parts = [];
@@ -458,6 +463,8 @@ function renderAnswerMeta(view) {
   if (cost) parts.push(el('span', '', costPrefix(usage, cost) + cost));
   if (view.grounded === false) parts.push(el('span', '', 'без обращения к базе'));
   if (view.truncated) parts.push(el('span', '', 'ответ обрезан по лимиту длины'));
+  const check = numberCheckNode(view.numberCheck);
+  if (check) parts.push(check);
   if (view.content) parts.push(copyButton(view));
   view.meta.replaceChildren(...parts);
 }
@@ -579,6 +586,9 @@ function handleStreamEvent(view, event, data) {
       view.grounded = data.grounded ?? null;
       view.truncated = Boolean(data.truncated);
       break;
+    case 'number_check':
+      view.numberCheck = data;
+      break;
     case 'usage':
       view.usage = data.turn ?? null;
       Object.assign(state.session, {
@@ -604,10 +614,12 @@ function finishAnswer(view) {
   view.tools.interruptPending();
   setTurnStatus(view, '');
   renderMarkdown(view.body, view.content);
+  highlightNumbers(view.body, view.numberCheck?.unconfirmed ?? []);
   view.root.removeAttribute('aria-busy');
   renderAnswerMeta(view);
   state.session?.messages.push({
     role: 'assistant', content: view.content, trace: view.tools.calls(), usage: view.usage ?? {}, grounded: view.grounded,
+    number_check: view.numberCheck,
   });
   scrollToEnd();
 }
