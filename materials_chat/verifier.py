@@ -29,6 +29,9 @@ class VerdictReport(BaseModel):
 REPORT_TOOL = convert_to_openai_tool(VerdictReport)
 REPORT_TOOL["function"]["name"] = "submit_verdict"
 BAD_OUTPUT = "Проверяющий вернул ответ в неожиданном формате. Повторите проверку."
+# Отчёт длиннее ответа чата: ~150 токенов на утверждение, у ответа о 20 марках их десятки.
+VERIFIER_MAX_TOKENS = 16384
+SOURCE_KEYS = ("resource_id", "resource_title", "served_from", "indexed_at", "fetched_at", "live_error", "sources")
 
 
 def verifier_model_name(settings) -> str:
@@ -48,14 +51,18 @@ def summarize(claims: list[Claim]) -> dict:
 
 
 def successful_data(traces: list[dict]) -> list[dict]:
-    """Только удачные вызовы: ошибки инструментов данными из базы не являются."""
+    """Только удачные вызовы: ошибки инструментов данными из базы не являются.
+
+    source — откуда данные (ресурс, дата снимка, живое чтение): ответ обязан назвать источник.
+    """
     records = []
     for trace in traces:
         result = trace.get("result")
         if trace.get("is_error") or not isinstance(result, dict) or result.get("ok") is False:
             continue
+        meta = result.get("meta") or {}
         records.append({"tool": trace.get("name"), "arguments": trace.get("arguments"), "data": result.get("data"),
-                        "served_from": (result.get("meta") or {}).get("served_from")})
+                        "source": {key: meta[key] for key in SOURCE_KEYS if meta.get(key) is not None}})
     return records
 
 
@@ -82,10 +89,12 @@ async def verify_answer(settings, question: str, answer: str, traces: list[dict]
     if not successful_data(traces):
         raise ProviderError("В диалоге нет данных из базы — проверять ответ не с чем.", "no_data")
     messages = verifier_messages(question, answer, traces)
-    if SessionStore.estimate_tokens(messages) > context_budget(settings, model_info):
+    # Под отчёт проверяющего в окне оставлено больше места, чем под ответ чата.
+    reserve = max(0, VERIFIER_MAX_TOKENS - getattr(settings, "max_output_tokens", 4096))
+    if SessionStore.estimate_tokens(messages) > context_budget(settings, model_info) - reserve:
         raise ProviderError("Данные диалога не помещаются в окно контекста проверяющего.", "context_limit")
     name = verifier_model_name(settings)
-    model = model or create_chat_model(settings, model=name)
+    model = model or create_chat_model(settings, model=name, max_tokens=VERIFIER_MAX_TOKENS)
     try:
         # Стриминг нужен, чтобы RouterAIChat сохранил стоимость провайдера в provider_usage.
         chunks = [chunk async for chunk in model.bind_tools([REPORT_TOOL], tool_choice="required").astream(messages)]
@@ -97,6 +106,10 @@ async def verify_answer(settings, question: str, answer: str, traces: list[dict]
     message = chunks[0]
     for chunk in chunks[1:]:
         message += chunk
+    if message.response_metadata.get("finish_reason") == "length":
+        # Обрезанные аргументы LangChain дочитывает как неполный JSON: часть утверждений пропала бы молча.
+        raise ProviderError("Проверяющий не уложился в лимит длины ответа. Проверка не выполнена — "
+                            "повторите её или задайте вопрос уже.", "verifier_truncated")
     report = parse_report(message)
     return {**summarize(report.claims), "claims": [claim.model_dump() for claim in report.claims],
             "usage": request_usage(message.response_metadata.get("provider_usage"), model_info), "model": name,

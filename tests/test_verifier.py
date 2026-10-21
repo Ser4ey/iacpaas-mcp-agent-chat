@@ -4,13 +4,17 @@ import json
 
 import pytest
 
+from materials_chat import verifier
 from materials_chat.openrouter import ProviderError
-from materials_chat.verifier import Claim, summarize, verifier_model_name, verify_answer
-from test_agent_backend import PRICES, Provider, settings, text_reply, verdict_reply
+from materials_chat.sessions import SessionStore
+from materials_chat.verifier import Claim, successful_data, summarize, verifier_model_name, verify_answer
+from test_agent_backend import PRICES, Provider, event, settings, text_reply, verdict_reply
 
+META = {"resource_id": "materials", "resource_title": "Справочник по материалам", "resource_path": "Мой Фонд/…",
+        "indexed_at": "2026-10-18T09:59:24+00:00", "served_from": "local_index", "last_sync_error": None}
 TRACE = [{"id": "t1", "name": "find_materials", "is_error": False,
           "arguments": {"conditions": [{"element": "Cr", "op": ">", "value": 20}]},
-          "result": {"ok": True, "meta": {"served_from": "local_index"}, "data": {"total": 1, "materials": [
+          "result": {"ok": True, "meta": META, "data": {"total": 1, "materials": [
               {"node_id": "200", "name": "Х25", "contents": {"Cr": {"low": 23.0, "high": 27.0, "text": "23.0–27.0 %"}}}]}}},
          {"id": "t2", "name": "get_subgraph", "arguments": {}, "is_error": True,
           "result": {"ok": False, "error": {"code": "NODE_NOT_FOUND", "message": "нет вершины"}}}]
@@ -51,6 +55,61 @@ def test_summary_thresholds():
 def test_verifier_model_defaults_to_the_agent_model():
     assert verifier_model_name(settings()) == "local-model"
     assert verifier_model_name(settings(verifier_model="other/model")) == "other/model"
+
+
+def test_verifier_sees_where_the_data_came_from():
+    provider = Provider(verdict_reply(CLAIMS))
+    verify(provider, settings())
+    sent = json.dumps(provider.requests[0]["messages"], ensure_ascii=False)
+    # Ответ обязан назвать ресурс и дату снимка: без meta проверяющий счёл бы это «нет в данных».
+    assert "Справочник по материалам" in sent and "2026-10-18T09:59:24+00:00" in sent
+    assert "Поле source" in provider.requests[0]["messages"][0]["content"]
+    fallback = {"id": "s", "name": "search_graph", "arguments": {"query": "Х25"}, "is_error": False,
+                "result": {"ok": True, "data": {"hits": []}, "meta": {
+                    "served_from": "local_index_fallback", "indexed_at": "2026-10-18T09:59:24+00:00",
+                    "live_error": {"code": "timeout", "message": "нет ответа"}, "search_type": "lexical_prefix",
+                    "sources": [{"resource_id": "materials", "indexed_at": "2026-10-18T09:59:24+00:00"}]}}}
+    first, second = successful_data([TRACE[0], fallback])
+    assert first["source"] == {"resource_id": "materials", "resource_title": "Справочник по материалам",
+                               "served_from": "local_index", "indexed_at": "2026-10-18T09:59:24+00:00"}
+    assert second["source"] == {key: fallback["result"]["meta"][key]
+                                for key in ("served_from", "indexed_at", "live_error", "sources")}
+
+
+def test_report_cut_by_the_length_limit_is_an_error_not_a_verdict():
+    claims = [CLAIMS[0], {"text": "У Х25 никеля 5 %", "status": "contradicted", "node_id": "200", "evidence": "нет Ni"}]
+    full = json.dumps({"claims": claims}, ensure_ascii=False)
+    cut = full[:full.index(', {"text": "У Х25 никеля')]  # второе утверждение не успело прийти
+    call = {"index": 0, "id": "verdict", "type": "function", "function": {"name": "submit_verdict", "arguments": cut}}
+    provider = Provider([event({"role": "assistant", "tool_calls": [call]}, "length")])
+    with pytest.raises(ProviderError) as error:
+        verify(provider, settings())
+    assert error.value.code == "verifier_truncated" and "лимит" in str(error.value)
+
+
+def test_verifier_has_its_own_output_cap(monkeypatch):
+    provider = Provider(verdict_reply(CLAIMS))
+    model = provider.model(settings())
+    created = []
+
+    def create(config, **overrides):
+        created.append(overrides)
+        return model
+
+    monkeypatch.setattr(verifier, "create_chat_model", create)
+    asyncio.run(verify_answer(settings(verifier_model="other/model"), "Вопрос?", "Ответ.", TRACE))
+    # Отчёт по ответу на 20 марок длиннее обычного ответа чата: ~150 токенов на утверждение.
+    assert created == [{"model": "other/model", "max_tokens": 16384}]
+    assert "80 символов" in verifier.VERIFIER_PROMPT  # короткие выдержки — отчёт короче
+
+
+def test_window_keeps_room_for_the_report():
+    provider = Provider(verdict_reply(CLAIMS))
+    tokens = SessionStore.estimate_tokens(verifier.verifier_messages("Где хрома больше 20 %?", "Ответ про Х25.", TRACE))
+    # Ответ чата (1800 токенов) поместился бы, отчёт проверяющего (16 384) — нет.
+    with pytest.raises(ProviderError) as error:
+        verify(provider, settings(), model_info={"context_window": tokens + 1800 + 100})
+    assert error.value.code == "context_limit" and not provider.requests
 
 
 def test_plain_json_answer_is_accepted():
