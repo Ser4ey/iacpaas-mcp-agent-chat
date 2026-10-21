@@ -99,5 +99,15 @@ class PlatformClient:
         raise PlatformError("AUTH_FAILED", "Не удалось обновить доступ IACPaaS.")
 
 
+def concept_path(labels: list[str]) -> str | None:
+    """Значение start-target-concept-path: имена от корня (без него) через «/».
+
+    Имя, в котором есть «/», платформа ждёт в тройных кавычках: /…/‴кг/м³‴.
+    """
+    if not labels:
+        return None
+    return "/" + "/".join(f"‴{label}‴" if "/" in label else label for label in labels)
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()

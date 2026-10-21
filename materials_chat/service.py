@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .config import Settings
 from .graph_store import GraphStore, subgraph_from_export
-from .platform import PlatformClient, PlatformError, utc_now
+from .platform import PlatformClient, PlatformError, concept_path, utc_now
 
 log = logging.getLogger(__name__)
 
@@ -324,10 +324,9 @@ class GraphService:
             return data, {**meta, "live_skipped": "fragment_too_large"}
         labels = await asyncio.to_thread(self.store.concept_labels, definition.id, root)
         if labels is None:
-            return data, self._fallback_meta(meta, "PATH_NOT_ADDRESSABLE", "Путь к вершине нельзя передать платформе.")
-        concept_path = ("/" + "/".join(labels)) if labels else None
+            return data, self._fallback_meta(meta, "PATH_NOT_FOUND", "Путь к вершине не восстановлен по индексу.")
         try:
-            graph = await self._live_export(definition, depth, concept_path)
+            graph = await self._live_export(definition, depth, concept_path(labels))
         except PlatformError as failure:
             return data, self._fallback_meta(meta, failure.code, failure.message)
         target = self._descend(graph, labels)

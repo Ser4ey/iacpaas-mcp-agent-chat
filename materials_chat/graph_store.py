@@ -168,7 +168,7 @@ class GraphStore:
     def concept_labels(self, resource_id: str, node_id: str) -> list[str] | None:
         """Имена вершин от корня (без него) до node_id — так IACPaaS адресует вершину.
 
-        None, если вершины нет или путь нельзя однозначно записать (в имени есть «/»).
+        None, если вершины нет.
         """
         labels = []
         with self.connect() as db:
@@ -184,8 +184,6 @@ class GraphStore:
                                      (resource_id, current)).fetchall()
                 if not parents:  # дошли до корня; сам корень в путь не входит
                     return list(reversed(labels))
-                if "/" in row["label"]:
-                    return None
                 # На вершину могут вести ссылки из других мест; идём по основному пути,
                 # тому самому, что сохранён в индексе при первом появлении вершины.
                 primary = next((parent for parent in parents if parent["path"] + "/" + row["label"] == row["path"]), parents[0])

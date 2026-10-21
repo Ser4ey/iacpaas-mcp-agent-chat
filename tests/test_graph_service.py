@@ -183,7 +183,7 @@ async def test_unavailable_platform_falls_back_to_the_index(tmp_path):
     assert result.meta["live_error"]["code"] == "PLATFORM_TIMEOUT"
 
 
-async def test_moved_node_and_unaddressable_path_fall_back(tmp_path):
+async def test_moved_node_falls_back_and_slash_names_are_quoted(tmp_path):
     service = make_service(tmp_path, live_reads=True)
     moved = graph_with_shared_cycle()
     moved["successors"][0]["id"] = 999
@@ -194,8 +194,10 @@ async def test_moved_node_and_unaddressable_path_fall_back(tmp_path):
     slashed = graph_with_shared_cycle()
     slashed["successors"][0]["name"] = "кг/м³"
     service.store.import_graph("materials", slashed)
+    service.client = platform = FakePlatform(graph=slashed)
     result = await service.get_subgraph("materials", "2", depth=1)
-    assert result.meta["live_error"]["code"] == "PATH_NOT_ADDRESSABLE"
+    assert platform.calls == [("Тест / Материалы", 1, "/‴кг/м³‴")]
+    assert result.meta["served_from"] == "iacpaas_live"
 
 
 async def test_large_fragment_is_served_from_the_index(tmp_path):
