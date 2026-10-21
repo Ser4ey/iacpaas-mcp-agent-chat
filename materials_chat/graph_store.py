@@ -6,6 +6,7 @@ from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 
+from .composition import rebuild_composition
 from .platform import utc_now
 
 
@@ -67,6 +68,17 @@ class GraphStore:
                     resource_id UNINDEXED, node_id UNINDEXED, label, body,
                     tokenize='unicode61 remove_diacritics 2'
                 );
+                -- Производные таблицы: строятся из nodes/edges, composition_state сверяет их с resources.
+                CREATE TABLE IF NOT EXISTS composition_materials (
+                    resource_id TEXT NOT NULL, material_id TEXT NOT NULL, name TEXT, classes TEXT, base TEXT,
+                    PRIMARY KEY(resource_id,material_id)
+                );
+                CREATE TABLE IF NOT EXISTS composition_elements (
+                    resource_id TEXT NOT NULL, material_id TEXT NOT NULL, element TEXT NOT NULL,
+                    form TEXT, low REAL, high REAL, text TEXT,
+                    PRIMARY KEY(resource_id,material_id,element)
+                );
+                CREATE TABLE IF NOT EXISTS composition_state (resource_id TEXT PRIMARY KEY, indexed_at TEXT);
             """)
 
     @contextmanager
@@ -123,7 +135,45 @@ class GraphStore:
             db.executemany("INSERT INTO search_index VALUES (?,?,?,?)", fts)
             db.execute("INSERT OR REPLACE INTO resources VALUES (?,?,?,?,?,NULL)",
                        (resource_id, json.dumps(metadata, ensure_ascii=False), indexed_at, len(nodes), len(edges)))
+            rebuild_composition(db, resource_id, indexed_at)
         return {"resource_id": resource_id, "nodes": len(nodes), "edges": len(edges), "indexed_at": indexed_at}
+
+    def composition(self, resource_id: str) -> list[dict]:
+        """Состав марок ресурса по алфавиту; таблица перестраивается, если отстала от индекса."""
+        with self.connect() as db:
+            resource = db.execute("SELECT indexed_at FROM resources WHERE resource_id=?", (resource_id,)).fetchone()
+            if resource is None:
+                raise KeyError(resource_id)
+            state = db.execute("SELECT indexed_at FROM composition_state WHERE resource_id=?",
+                               (resource_id,)).fetchone()
+            if state is None or state["indexed_at"] != resource["indexed_at"]:
+                rebuild_composition(db, resource_id, resource["indexed_at"])
+            records = {}
+            for row in db.execute("SELECT material_id, name, classes, base FROM composition_materials "
+                                  "WHERE resource_id=? ORDER BY name, material_id", (resource_id,)):
+                records[row["material_id"]] = {"node_id": row["material_id"], "name": row["name"],
+                                               "classes": json.loads(row["classes"]), "base": row["base"],
+                                               "contents": {}}
+            for row in db.execute("SELECT material_id, element, form, low, high, text FROM composition_elements "
+                                  "WHERE resource_id=?", (resource_id,)):
+                records[row["material_id"]]["contents"][row["element"]] = {
+                    "form": row["form"], "low": row["low"], "high": row["high"], "text": row["text"]}
+        return list(records.values())
+
+    def element_symbols(self) -> dict[str, str]:
+        """Русское название элемента (нормализованное) → символ, по базе элементов любого ресурса."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT e.label, s.label AS symbol, s.payload FROM nodes e "
+                "JOIN edges ON edges.resource_id=e.resource_id AND edges.parent_id=e.node_id "
+                "JOIN nodes s ON s.resource_id=e.resource_id AND s.node_id=edges.child_id "
+                "WHERE e.meta='Химический элемент' AND s.meta='обозначение' "
+                "ORDER BY e.resource_id, e.node_id").fetchall()
+        result = {}
+        for row in rows:
+            symbol = json.loads(row["payload"] or "{}").get("value") or row["symbol"]
+            result.setdefault(normalized(row["label"]), str(symbol))
+        return result
 
     def record_error(self, resource_id: str, message: str):
         with self.connect() as db:
