@@ -13,7 +13,7 @@ FIND = {"id": "f", "name": "find_materials", "arguments": {"conditions": [{"elem
         "is_error": False, "result": {"ok": True, "data": {"total": 2, "materials": [
             {"node_id": "200", "name": "Х25", "contents": {"Cr": {"form": "Числовой интервал", "low": 23.0,
                                                                   "high": 27.0, "text": "23.0–27.0 %"}}}]}}}
-FAILED = {"id": "x", "name": "get_subgraph", "arguments": {}, "is_error": True,
+FAILED = {"id": "x", "name": "get_subgraph", "arguments": {"resource_id": "materials", "root": "555"}, "is_error": True,
           "result": {"ok": False, "error": {"code": "NODE_NOT_FOUND", "message": "Вершина 555 не найдена"}}}
 
 
@@ -32,9 +32,24 @@ def test_list_markers_grade_names_and_dates_are_skipped():
     assert written("1. Марка 12Х18Н10Т — хром 17.0\n2) АК4-1, Б83 и Д16\n- снимок от 21.10.2026 и 2026-10-18") == ["17.0"]
 
 
+def test_dates_with_month_names_are_skipped():
+    assert written("Снимок от 18 октября 2026 г., обновлён 1 марта 2027 года; хром 17.0") == ["17.0"]
+    assert written("Дата снимка: 9 декабря 2026 г.") == []
+
+
+def test_table_row_numbers_are_skipped():
+    table = "| № | Марка | Cr, % |\n|---|---|---|\n| 1 | Х25 | 23–27 |\n|  2. | Х17 | 16–18 |\n| 3) | Х13 | 12–14 |"
+    assert written(table) == ["23", "27", "16", "18", "12", "14"]
+    top = "Топ по хрому:\n\n| № | Марка | Cr, % |\n|:-:|---|---|\n| 1 | Х25 | 23–27 |\n| 2 | Х25 | 23.0–27.0 |"
+    assert check_numbers(top, "Где больше всего хрома?", [FIND]) == \
+        {"status": "checked", "checked": 2, "confirmed": 2, "unconfirmed": []}
+
+
 def test_values_compare_by_number():
     assert {value for _, value in extract_numbers("17 17.0 17,0")} == {Decimal("17")}
     assert extract_numbers("2 670")[0][1] == Decimal("2670")
+    # Разделитель тысяч — неразрывный или узкий неразрывный пробел, как пишут модели.
+    assert extract_numbers("2 670 и 7 900") == [("2 670", Decimal("2670")), ("7 900", Decimal("7900"))]
 
 
 def test_only_data_fields_count():
@@ -53,6 +68,14 @@ def test_answer_numbers_are_checked_against_data():
 def test_missing_numbers_are_listed_once_as_written():
     result = check_numbers("Прочность 9500 МПа, после отжига 10 300 МПа; снова 9500.", "Прочность?", [SEARCH])
     assert result == {"status": "checked", "checked": 2, "confirmed": 0, "unconfirmed": ["9500", "10 300"]}
+
+
+def test_arguments_of_failed_calls_are_not_trusted():
+    # Модель придумала вершину 555, получила NODE_NOT_FOUND и всё равно на неё сослалась.
+    assert check_numbers("Подробности — в вершине 555.", "Состав Х25?", [FIND, FAILED]) == \
+        {"status": "checked", "checked": 1, "confirmed": 0, "unconfirmed": ["555"]}
+    # Порог из аргументов удачного вызова не проверяется: модель взяла его в запрос.
+    assert check_numbers("Хрома больше 20 %: Х25.", "Где много хрома?", [FIND])["status"] == "no_numbers"
 
 
 def test_no_data_and_no_numbers():

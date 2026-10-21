@@ -11,7 +11,11 @@ DATA_KEYS = {"label", "value", "comment", "name", "path", "snippet", "node_id", 
              "edges", "contents", "low", "high", "text", "base", "class", "title"}
 
 _BLANK = "[ \u00a0\u202f]"  # обычный, неразрывный и узкий неразрывный пробелы
-_MASKED = re.compile(r"\b\d{1,2}\.\d{1,2}\.\d{4}\b|\b\d{4}-\d{2}-\d{2}\b|^[ \t]*\d+[.)](?=\s)", re.M)
+_MONTHS = "января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря"
+# Даты (21.10.2026, 2026-10-18, 18 октября 2026 г.), маркеры списков и номер строки в первой ячейке таблицы
+_MASKED = re.compile(rf"\b\d{{1,2}}\.\d{{1,2}}\.\d{{4}}\b|\b\d{{4}}-\d{{2}}-\d{{2}}\b"
+                     rf"|\b\d{{1,2}}{_BLANK}+(?:{_MONTHS}){_BLANK}+\d{{4}}\b(?:{_BLANK}*г\.)?"
+                     r"|^[ \t]*\d+[.)](?=\s)|^[ \t]*\|[ \t]*\d{1,3}[.)]?[ \t]*(?=\|)", re.M)
 # Сначала число с пробелами-разделителями тысяч, иначе «слово»: буквы и цифры через - . ,
 _TOKEN = re.compile(rf"(?<![^\W_])(?P<grouped>\d{{1,3}}(?:{_BLANK}\d{{3}})+(?:[.,]\d+)?)(?![^\W_])"
                     r"|(?P<word>[^\W_]+(?:[-.,][^\W_]+)*)")
@@ -24,7 +28,7 @@ def _to_decimal(raw: str) -> Decimal:
 
 def extract_numbers(text: str) -> list[tuple[str, Decimal]]:
     """Числа текста: (как записано, абсолютное значение) в порядке появления."""
-    # Даты и маркеры списков закрываем пробелами той же длины: числа в них не считаются
+    # Даты, маркеры списков и номера строк таблицы закрываем пробелами той же длины: числа в них не считаются
     text = _MASKED.sub(lambda match: " " * len(match.group()), text)
     found = []
     for match in _TOKEN.finditer(text):
@@ -67,8 +71,14 @@ def data_numbers(traces: list[dict]) -> set[Decimal]:
 
 
 def check_numbers(answer: str, question: str, traces: list[dict]) -> dict:
-    """Сверяет числа ответа с данными вызовов; числа из вопроса и аргументов не проверяются: их назвал пользователь."""
-    known = _numbers_of(question) | _numbers_of([trace.get("arguments") for trace in traces])
+    """Сверяет числа ответа с данными вызовов.
+
+    Не проверяются числа из вопроса (их назвал пользователь) и из аргументов удачных вызовов (модель взяла их
+    в запрос). Аргументы неудачных вызовов не в счёт: придуманная вершина с NODE_NOT_FOUND не подтверждена.
+    """
+    called = [trace.get("arguments") for trace in traces
+              if isinstance(trace.get("result"), dict) and trace["result"].get("ok")]
+    known = _numbers_of(question) | _numbers_of(called)
     unique: dict[Decimal, str] = {}
     for raw, value in extract_numbers(answer):
         if value not in known:
