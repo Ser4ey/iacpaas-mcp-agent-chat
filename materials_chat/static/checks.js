@@ -1,7 +1,8 @@
 /*
- * Сверка чисел ответа с данными: строка под ответом и подсветка ненайденных чисел.
+ * Сверка ответа с данными: строка сверки чисел, подсветка ненайденных чисел и блок вердикта проверки.
  * Только DOM-узлы и textContent, как в markdown.js, — innerHTML не используется.
  */
+import { formatCost, plural } from './format.js';
 
 const NO_MATCH_HINT = 'Сверено с данными: {confirmed} из {checked}. '
   + 'Сюда попадают и числа, вычисленные моделью (пересчёт единиц, суммы), — это не обязательно ошибка.';
@@ -84,6 +85,61 @@ function isWholeNumber(text, start, end) {
   if (end >= text.length) return true;
   if (WORD_CHAR.test(text[end])) return false;
   return !(/[.,]/.test(text[end]) && end + 1 < text.length && DIGIT.test(text[end + 1]));
+}
+
+const CLAIM_STATUS = {
+  confirmed: 'подтверждено',
+  not_in_data: 'нет в данных',
+  contradicted: 'противоречит данным',
+};
+
+/** Блок вердикта проверки: итог, расход, раскрывающийся список утверждений. */
+export function verdictNode(verification) {
+  const root = document.createElement('div');
+  root.className = 'answer-verdict';
+  const claims = verification.claims ?? [];
+  const total = verification.total ?? claims.length;
+  const summary = [];
+  if (total > 0) {
+    const percent = typeof verification.percent === 'number' ? ` (${verification.percent} %)` : '';
+    const count = plural(total, ['утверждения', 'утверждений', 'утверждений']);
+    summary.push(`Подтверждено ${verification.confirmed} из ${count}${percent}`);
+  }
+  if (verification.verdict) summary.push(verification.verdict);
+  root.append(span('verdict-summary', summary.join(' · ')));
+
+  const usage = usageLine(verification.usage);
+  if (usage) root.append(span('verdict-usage', usage));
+  if (claims.length) root.append(claimsList(claims));
+  return root;
+}
+
+/** Расход самой проверки («Проверка: 1 234 токена · 0,12 ₽»); пусто, если расход неизвестен. */
+function usageLine(usage) {
+  if (!usage) return '';
+  const parts = [];
+  if (usage.total_tokens) parts.push(plural(usage.total_tokens, ['токен', 'токена', 'токенов']));
+  const cost = formatCost(usage.cost, usage.currency);
+  if (cost) parts.push(`${usage.cost_known === false && !cost.startsWith('<') ? '≥ ' : ''}${cost}`);
+  return parts.length ? `Проверка: ${parts.join(' · ')}` : '';
+}
+
+function claimsList(claims) {
+  const details = document.createElement('details');
+  details.className = 'verdict-claims';
+  const title = document.createElement('summary');
+  title.textContent = 'Утверждения';
+  const list = document.createElement('ul');
+  for (const claim of claims) {
+    const item = document.createElement('li');
+    item.className = `claim is-${claim.status}`;
+    item.append(span('claim-status', CLAIM_STATUS[claim.status] ?? claim.status), span('claim-text', claim.text));
+    const support = [claim.node_id ? `вершина ${claim.node_id}` : '', claim.evidence].filter(Boolean).join(': ');
+    if (support) item.append(span('claim-support', support));
+    list.append(item);
+  }
+  details.append(title, list);
+  return details;
 }
 
 function span(className, text) {

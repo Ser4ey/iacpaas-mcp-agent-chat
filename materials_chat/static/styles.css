@@ -745,6 +745,86 @@ svg {
   color: var(--text-3);
 }
 
+/* Вердикт проверки ответа: под строкой расхода, внутри карточки. */
+.answer-verdict-slot:empty {
+  display: none;
+}
+
+.answer-verdict {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-size: 14px;
+}
+
+.verdict-summary {
+  display: block;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.verdict-usage {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.verdict-claims {
+  margin-top: 8px;
+}
+
+.verdict-claims > summary {
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.verdict-claims ul {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.claim {
+  display: grid;
+  gap: 2px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+}
+
+.claim-status {
+  justify-self: start;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.claim.is-confirmed .claim-status {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.claim.is-not_in_data .claim-status {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.claim.is-contradicted .claim-status {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.claim-support {
+  color: var(--text-3);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 /* ========== Журнал инструментов ========== */
 
 .tool-log {

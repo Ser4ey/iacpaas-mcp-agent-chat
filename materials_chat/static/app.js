@@ -13,7 +13,7 @@
 import { api, streamChat } from './api.js';
 import { renderDataView, renderIndexStatus } from './data-view.js';
 import { formatCompact, formatCost, formatNumber, formatShortDate, plural } from './format.js';
-import { highlightNumbers, numberCheckNode } from './checks.js';
+import { highlightNumbers, numberCheckNode, verdictNode } from './checks.js';
 import { renderMarkdown } from './markdown.js';
 import { ToolLog, normalizeTrace, toolActivity } from './trace.js';
 
@@ -417,18 +417,23 @@ function createAnswerView(turn) {
   const body = el('div', 'answer-body prose');
   const errors = el('div', 'answer-errors');
   const meta = el('div', 'answer-meta');
-  // Текст, ошибки и строка расхода — одна карточка под журналом инструментов.
+  const verdict = el('div', 'answer-verdict-slot');
+  // Текст, ошибки, строка расхода и вердикт проверки — одна карточка под журналом инструментов.
   const card = el('div', 'answer-card');
-  card.append(body, errors, meta);
+  card.append(body, errors, meta, verdict);
   root.append(log, status, card);
   turn.append(root);
   return {
-    root, status, body, errors, meta,
+    root, status, body, errors, meta, verdict,
     tools: new ToolLog(log),
     content: '',
     usage: null,
     grounded: null,
     numberCheck: null,
+    messageId: null,      // id сохранённого сообщения: без него проверить ответ нельзя
+    verification: null,
+    verifying: false,
+    verifyError: '',
     truncated: false,
     done: false,
     renderQueued: false,
@@ -440,12 +445,15 @@ function showSavedAnswer(view, message) {
   view.usage = message.usage ?? null;
   view.grounded = message.grounded ?? null;
   view.numberCheck = message.number_check ?? null;
+  view.messageId = message.id ?? null;
+  view.verification = message.verification ?? null;
   normalizeTrace(message.trace).forEach((call) => view.tools.update(call));
   renderMarkdown(view.body, view.content);
   highlightNumbers(view.body, view.numberCheck?.unconfirmed ?? []);
   // Остановка или сбой хода хранятся отдельно от текста ответа (поле error).
   if (message.error?.message) addAnswerError(view, message.error.message, message.error.code === 'cancelled');
   renderAnswerMeta(view);
+  renderVerdict(view);
 }
 
 /** Тихая строка под ответом: токены · стоимость · «без обращения к базе» · сверка чисел · Копировать. */
@@ -466,6 +474,7 @@ function renderAnswerMeta(view) {
   const check = numberCheckNode(view.numberCheck);
   if (check) parts.push(check);
   if (view.content) parts.push(copyButton(view));
+  if (view.content && view.messageId) parts.push(verifyButton(view));
   view.meta.replaceChildren(...parts);
 }
 
@@ -482,6 +491,50 @@ function copyButton(view) {
     setTimeout(() => { button.textContent = 'Копировать'; }, 2000);
   });
   return button;
+}
+
+function verifyButton(view) {
+  const button = el('button', 'link-button', view.verifying ? 'Проверяю…' : 'Проверить');
+  button.type = 'button';
+  button.disabled = view.verifying;
+  button.title = 'Сверить утверждения ответа с данными из базы; проверка оплачивается отдельно';
+  button.addEventListener('click', () => verifyAnswer(view));
+  return button;
+}
+
+/** Блок вердикта под строкой расхода; повторная проверка заменяет прежний блок. */
+function renderVerdict(view) {
+  if (view.verifyError) view.verdict.replaceChildren(el('p', 'answer-error', `Не удалось проверить: ${view.verifyError}`));
+  else if (view.verification) view.verdict.replaceChildren(verdictNode(view.verification));
+  else view.verdict.replaceChildren();
+}
+
+async function verifyAnswer(view) {
+  const session = state.session;
+  if (view.verifying || !session || !view.messageId) return;
+  const sessionId = session.id;
+  view.verifying = true;
+  view.verifyError = '';
+  renderAnswerMeta(view);
+  try {
+    const path = `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(view.messageId)}/verify`;
+    const result = await api(path, { method: 'POST', body: '{}' });
+    view.verification = result.verification;
+    // Диалог за время запроса могли сменить: тогда обновляем только вид этого ответа.
+    if (state.session?.id === sessionId) {
+      state.session.usage = result.session_usage ?? state.session.usage;
+      const saved = state.session.messages.find((m) => m.id === view.messageId);
+      if (saved) saved.verification = result.verification;
+      renderMeter();
+    }
+    loadSessions().catch(() => {}); // стоимость диалога в списке
+  } catch (error) {
+    view.verifyError = error.message;
+  } finally {
+    view.verifying = false;
+    renderAnswerMeta(view);
+    renderVerdict(view);
+  }
 }
 
 function setTurnStatus(view, text) {
@@ -604,6 +657,7 @@ function handleStreamEvent(view, event, data) {
       break;
     case 'done':
       view.done = true;
+      view.messageId = data?.message_id ?? null;
       break;
     default:
       break; // незнакомые события пропускаем: так старый интерфейс переживёт новые поля сервера
@@ -619,7 +673,7 @@ function finishAnswer(view) {
   renderAnswerMeta(view);
   state.session?.messages.push({
     role: 'assistant', content: view.content, trace: view.tools.calls(), usage: view.usage ?? {}, grounded: view.grounded,
-    number_check: view.numberCheck,
+    number_check: view.numberCheck, id: view.messageId, verification: null,
   });
   scrollToEnd();
 }
