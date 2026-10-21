@@ -446,13 +446,13 @@ def test_web_stream_saves_trace_grounding_and_hides_internal_reasoning(tmp_path)
         assert "private_internal" not in json.dumps(detail)
 
 
-def make_app(tmp_path):
+def make_app(tmp_path, **overrides):
     from materials_chat.config import Settings
     from materials_chat.web import create_app
     # Адрес провайдера недоступен: тест не ходит в сеть за каталогом моделей.
     return create_app(Settings(_env_file=None, data_dir=tmp_path, history_path=tmp_path / "history.sqlite3",
                                auto_sync_on_start=False, openrouter_api_key="test-fake-never-sent",
-                               openrouter_model="fake", openrouter_base_url="http://127.0.0.1:9"))
+                               openrouter_model="fake", openrouter_base_url="http://127.0.0.1:9", **overrides))
 
 
 def scripted_agent(turns):
@@ -552,6 +552,69 @@ def test_verify_saves_the_verdict_and_adds_its_cost(tmp_path):
         again = client.post(url).json()  # повторная проверка заменяет вердикт, но расход копится
         assert again["session_usage"]["total_tokens"] == 40
         assert client.get(f"/api/sessions/{session_id}").json()["usage"]["total_tokens"] == 40
+
+
+def test_failed_verification_is_logged_and_not_saved(tmp_path, caplog):
+    from fastapi.testclient import TestClient
+    app = make_app(tmp_path)
+    app.state.agent_factory = scripted_agent([("Больше всего хрома у Х25: 23–27 %.", [FIND_ENTRY])])
+    cut = '{"claims": [{"text": "У Х25 хрома 23–27 %", "status": "confirmed"}, {"text": "У Х25'
+    call = {"index": 0, "id": "verdict", "type": "function", "function": {"name": "submit_verdict", "arguments": cut}}
+    with_verifier(app, Provider([event({"role": "assistant", "tool_calls": [call]}, "length")]))
+    with TestClient(app) as client:
+        session_id = client.post("/api/sessions").json()["id"]
+        client.post(f"/api/sessions/{session_id}/chat", json={"message": "У какой марки больше всего хрома?"})
+        answer = client.get(f"/api/sessions/{session_id}").json()["messages"][1]
+        with caplog.at_level("WARNING", logger="materials_chat.web"):
+            response = client.post(f"/api/sessions/{session_id}/messages/{answer['id']}/verify")
+        assert response.status_code == 502 and "лимит" in response.json()["detail"]
+        assert any("verifier_truncated" in record.getMessage() for record in caplog.records)
+        saved = client.get(f"/api/sessions/{session_id}").json()
+        # Расход неудачной проверки не к чему привязать: вердикта нет, в диалог он не попадает.
+        assert saved["messages"][1]["verification"] is None and saved["usage"]["total_tokens"] == 0
+
+
+@pytest.mark.parametrize("listed", [True, False])
+def test_separate_verifier_model_gets_its_own_catalog_entry(tmp_path, monkeypatch, listed):
+    from fastapi.testclient import TestClient
+    from materials_chat.verifier import verify_answer
+    catalog = {"fake": {"context_window": 1_000_000, "price_input_per_million": 5.0, "price_output_per_million": 10.0},
+               "other/model": {"context_window": 64_000, "price_input_per_million": 1.0, "price_output_per_million": 2.0}}
+    asked = []
+
+    async def fetch_model_info(config):
+        asked.append(config.openrouter_model)
+        entry = catalog.get(config.openrouter_model) if listed or config.openrouter_model == "fake" else None
+        found = {"name": config.openrouter_model, "source": "provider", **entry} if entry else {}
+        return {"name": None, "context_window": None, "price_input_per_million": None,
+                "price_output_per_million": None, "price_cache_read_per_million": None, "currency": "RUB",
+                "source": "unknown", **found}
+
+    monkeypatch.setattr("materials_chat.web.fetch_model_info", fetch_model_info)
+    app = make_app(tmp_path, verifier_model="other/model")
+    app.state.agent_factory = scripted_agent([("Больше всего хрома у Х25: 23–27 %.", [FIND_ENTRY])])
+    provider, seen = Provider(verdict_reply([])), []
+
+    def verifier(config, *args, model_info=None):
+        seen.append(model_info)
+        return verify_answer(config, *args, model=provider.model(config), model_info=model_info)
+
+    app.state.verifier = verifier
+    with TestClient(app) as client:
+        session_id = client.post("/api/sessions").json()["id"]
+        client.post(f"/api/sessions/{session_id}/chat", json={"message": "У какой марки больше всего хрома?"})
+        answer = client.get(f"/api/sessions/{session_id}").json()["messages"][1]
+        url = f"/api/sessions/{session_id}/messages/{answer['id']}/verify"
+        usage = [client.post(url).json()["verification"]["usage"] for _ in range(2)]
+    assert asked == ["fake", "other/model"]  # каталог проверяющей модели запрошен один раз
+    assert seen[0] is seen[1] and usage[0]["currency"] == "RUB"
+    if listed:
+        assert (seen[0]["name"], seen[0]["context_window"]) == ("other/model", 64_000)
+        assert usage[0]["cost"] == pytest.approx((12 * 1 + 8 * 2) / 1_000_000)
+    else:
+        # Модели нет в каталоге: окно — как у агента, цены неизвестны (стоимость — только из usage.cost).
+        assert seen[0]["context_window"] == 1_000_000 and seen[0]["price_input_per_million"] is None
+        assert usage[0]["cost"] is None
 
 
 def test_verify_rejects_wrong_targets_without_calling_the_model(tmp_path):

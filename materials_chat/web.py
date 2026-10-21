@@ -86,6 +86,22 @@ def create_app(settings=None) -> FastAPI:
                 pass
         return app.state.model_info
 
+    async def verifier_model_info() -> dict:
+        """Окно и цены проверяющей модели; каталог другой модели запрашивается один раз, при первой проверке."""
+        agent_info = await current_model_info()
+        name = verifier_model_name(settings)
+        if name == settings.openrouter_model:
+            return agent_info
+        if app.state.verifier_model_info is None:
+            # PRICE_* в .env относятся к модели агента, не к проверяющей.
+            info = await fetch_model_info(settings.model_copy(update={
+                "openrouter_model": name, "price_input_per_million": None, "price_output_per_million": None}))
+            if info.get("context_window") is None:
+                # Модели нет в каталоге: окно — как у агента, цены неизвестны (стоимость — только из usage.cost).
+                info = {**info, "context_window": agent_info.get("context_window")}
+            app.state.verifier_model_info = info
+        return app.state.verifier_model_info
+
     @asynccontextmanager
     async def lifespan(app):
         nonlocal model_task
@@ -110,6 +126,7 @@ def create_app(settings=None) -> FastAPI:
     app.state.agent_factory = Agent
     app.state.verifier, app.state.locks = verify_answer, locks
     app.state.model_info = dict(UNKNOWN_MODEL)
+    app.state.verifier_model_info = None
 
     def existing(session_id):
         session = store.get(session_id)
@@ -264,13 +281,13 @@ def create_app(settings=None) -> FastAPI:
         lock = locks.get(session_id)
         if lock and lock.locked():
             raise HTTPException(409, "В этом диалоге сейчас формируется ответ. Проверьте после его завершения.")
-        # Цены известны только модели агента: у другой проверяющей модели стоимость берётся из usage.cost.
-        same_model = verifier_model_name(settings) == settings.openrouter_model
-        model_info = await current_model_info() if same_model else None
+        model_info = await verifier_model_info()
         try:
             verification = await app.state.verifier(settings, turn["question"], turn["answer"], turn["traces"],
                                                     model_info=model_info)
         except ProviderError as error:
+            # Текст ошибки составлен нами (тело ответа провайдера в него не попадает) — его можно писать в журнал.
+            log.warning("Проверка ответа %s не выполнена: %s — %s", message_id, error.code, error)
             status = {"no_data": 422, "context_limit": 413}.get(error.code, 502)
             raise HTTPException(status, str(error))
         store.save_verification(message_id, verification)
