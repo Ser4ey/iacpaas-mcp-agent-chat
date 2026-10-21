@@ -554,6 +554,8 @@ function queueAnswerRender(view) {
     view.renderQueued = false;
     const follow = isNearBottom();
     renderMarkdown(view.body, view.content);
+    // Кадр может наступить уже после finishAnswer: без этого перерисовка стёрла бы подсветку чисел.
+    highlightNumbers(view.body, view.numberCheck?.unconfirmed ?? []);
     if (follow) scrollToEnd(true);
   });
 }
