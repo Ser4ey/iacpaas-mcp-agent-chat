@@ -269,6 +269,19 @@ async def test_large_comments_are_shortened_and_marked(service):
     assert len(json.dumps(result.model_dump(), ensure_ascii=False)) < service.settings.max_result_chars
 
 
+async def test_short_links_are_not_marked_as_truncated(service):
+    data = graph_with_shared_cycle()
+    data["successors"][0]["original"] = ("Pristup.SA@vvsu.ru / Мой Фонд / Загрузки / База свойств материалов$"
+                                         "/Физические свойства/Плотность вещества;")
+    service.store.import_graph("materials", data)
+    node = (await service.get_subgraph("materials", "2", depth=0)).data["nodes"][0]
+    # Ссылка переведена в короткий путь, но ничего не обрезано.
+    assert node["links"] == ["Загрузки / База свойств материалов$/Физические свойства/Плотность вещества;"]
+    assert "fields_truncated" not in node
+    hit = service.search_graph("Алюминий", "materials").data["hits"][0]
+    assert hit["node_id"] == "2" and hit["fields_truncated"] is False
+
+
 def test_small_result_budget_still_returns_a_bounded_useful_search_hit(service):
     service.settings.max_result_chars = 2000
     result = service.search_graph("Алюминий", "materials")

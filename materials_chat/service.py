@@ -207,8 +207,10 @@ class GraphService:
                 result[key] = result[key][:cap] + "…"
                 shortened = True
         link_cap = min(1800, max(40, self.settings.max_result_chars // 20))
-        result["links"] = [self._relative_path(str(link))[:link_cap] for link in node.get("links", [])[:3]]
-        shortened = shortened or result["links"] != node.get("links", [])
+        # Укорочение пути до «Мой Фонд» — не усечение: признак только при обрезке по длине или по числу ссылок.
+        links = [self._relative_path(str(link)) for link in node.get("links", [])]
+        shortened = shortened or len(links) > 3 or any(len(link) > link_cap for link in links)
+        result["links"] = [link[:link_cap] for link in links[:3]]
         result["fields_truncated"] = shortened
         return result
 
