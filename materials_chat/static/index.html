@@ -42,10 +42,11 @@
         <!-- Индикатор: модель, заполнение контекста, стоимость диалога. -->
         <div class="meter" id="meter">
           <span class="meter-model" id="meter-model"></span>
-          <span class="meter-context" id="meter-context" hidden>
+          <!-- Индикатор контекста открывает панель «Что видит модель». -->
+          <button class="meter-context" id="meter-context" type="button" aria-haspopup="dialog" hidden>
             <span class="meter-bar" aria-hidden="true"><span id="meter-fill"></span></span>
             <span id="meter-context-text"></span>
-          </span>
+          </button>
           <span class="meter-cost" id="meter-cost" hidden></span>
         </div>
       </header>
@@ -94,6 +95,17 @@
       </section>
     </main>
   </div>
+
+  <!-- «Что видит модель»: что уйдёт в модель со следующим вопросом. Содержимое строит context-view.js -->
+  <dialog class="context-dialog" id="context-dialog" aria-labelledby="context-title">
+    <div class="context-head">
+      <h2 id="context-title">Что видит модель</h2>
+      <button class="icon-button" id="close-context" type="button" aria-label="Закрыть">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+      </button>
+    </div>
+    <div class="context-body" id="context-body"></div>
+  </dialog>
 
   <!-- Иконка удаления для строк списка диалогов (клонируется из JS). -->
   <template id="icon-delete">

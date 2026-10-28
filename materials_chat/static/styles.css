@@ -194,6 +194,41 @@ svg {
   text-underline-offset: 2px;
 }
 
+/* Проверка ответа — важное действие: заметная кнопка в цвет акцента в конце строки под ответом. */
+.verify-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.verify-button:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.verify-button:disabled {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.verify-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.answer-meta > .verify-button::before {
+  content: none;
+}
+
 /* Обычная кнопка с рамкой. */
 .button {
   padding: 6px 12px;
@@ -525,6 +560,179 @@ svg {
   background: var(--warning);
 }
 
+/* Индикатор контекста — кнопка: открывает панель «Что видит модель». */
+button.meter-context {
+  margin: -3px -6px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.meter-context:hover {
+  background: var(--bg-hover);
+  color: var(--text-2);
+}
+
+/* Панель «Что видит модель». */
+.context-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.context-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.context-dialog::backdrop {
+  background: var(--scrim);
+}
+
+.context-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.context-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.context-body {
+  overflow: auto;
+  padding: 14px 18px 18px;
+  font-size: 14px;
+}
+
+.context-total {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-rule,
+.context-empty {
+  margin: 4px 0 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.context-note {
+  margin: 14px 0 0;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.context-turn {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.context-turn.is-compacted {
+  background: var(--surface-2);
+}
+
+.context-turn-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.context-turn-title {
+  font-weight: 600;
+}
+
+.context-badge,
+.context-cut {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.context-badge.is-full {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.context-badge.is-compacted,
+.context-cut {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.context-cut {
+  margin-left: 8px;
+}
+
+.context-size {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-msg {
+  margin-top: 8px;
+}
+
+.context-msg-label {
+  display: block;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.context-msg > p {
+  margin: 2px 0 0;
+  white-space: pre-wrap;
+}
+
+.context-call {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.context-msg summary {
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.context-msg pre {
+  max-height: 260px;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.context-turn.is-compacted .context-msg pre {
+  background: var(--surface);
+}
+
 /* Стоимость диалога — акцентная метка. */
 .meter-cost {
   padding: 3px 10px;
@@ -759,10 +967,122 @@ svg {
   font-size: 14px;
 }
 
+/* Идёт проверка: блок в цвет действия, чтобы было видно, что работа не встала. */
+.answer-verdict.is-running {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.verdict-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
 .verdict-summary {
-  display: block;
   color: var(--text);
   font-weight: 600;
+}
+
+.verdict-badge {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.verdict-badge.is-ok {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.verdict-badge.is-partial {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.verdict-badge.is-bad {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.verdict-badge.is-neutral {
+  background: var(--surface);
+  color: var(--text-2);
+}
+
+.verdict-timer {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.verdict-spinner,
+.verify-spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.verdict-spinner {
+  color: var(--accent);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Доли статусов утверждений; во время проверки — бегущая полоса. */
+.verdict-bar {
+  display: flex;
+  height: 6px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.verdict-bar > .is-confirmed {
+  background: var(--success);
+}
+
+.verdict-bar > .is-not_in_data {
+  background: var(--warning);
+}
+
+.verdict-bar > .is-contradicted {
+  background: var(--danger);
+}
+
+.verdict-bar.is-running {
+  background: linear-gradient(90deg, transparent, var(--accent), transparent) no-repeat var(--accent-line);
+  background-size: 40% 100%;
+  animation: verdict-run 1.4s ease-in-out infinite;
+}
+
+@keyframes verdict-run {
+  from {
+    background-position: -70% 0;
+  }
+  to {
+    background-position: 170% 0;
+  }
+}
+
+.verdict-counts {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .verdict-usage {
@@ -781,6 +1101,13 @@ svg {
   cursor: pointer;
   color: var(--text-2);
   font-size: 13px;
+}
+
+.verdict-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: 12px;
 }
 
 .verdict-claims ul {
@@ -823,6 +1150,60 @@ svg {
   color: var(--text-3);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+/* Дословная цитата из ответа: по клику — переход к этому месту. */
+.claim-quote {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+button.claim-quote {
+  cursor: pointer;
+  text-decoration: underline dotted var(--text-3);
+  text-underline-offset: 3px;
+}
+
+button.claim-quote:hover {
+  color: var(--accent);
+  text-decoration: underline solid var(--accent);
+}
+
+.claim-quote.is-missing {
+  color: var(--text-2);
+}
+
+.claim-text {
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+::highlight(quote-confirmed) {
+  background-color: color-mix(in srgb, var(--success) 22%, transparent);
+  text-decoration: underline 2px var(--success);
+}
+
+::highlight(quote-not_in_data) {
+  background-color: color-mix(in srgb, var(--warning) 22%, transparent);
+  text-decoration: underline 2px var(--warning);
+}
+
+::highlight(quote-contradicted) {
+  background-color: color-mix(in srgb, var(--danger) 22%, transparent);
+  text-decoration: underline 2px var(--danger);
+}
+
+/* Запасной вариант для браузеров без Custom Highlight API: подсвечивается абзац или ячейка. */
+.quote-flash {
+  border-radius: 4px;
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 4px var(--accent-soft);
 }
 
 /* ========== Журнал инструментов ========== */

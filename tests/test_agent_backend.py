@@ -352,6 +352,55 @@ def test_atomic_session_history_compaction_and_delete(tmp_path):
     store.close()
 
 
+def save_tool_turns(store, session_id, count, content):
+    """Ходы с одним вызовом инструмента: как их сохраняет агент."""
+    for turn in range(count):
+        stored = [{"role": "assistant", "content": "", "tool_calls": [{"id": f"a{turn}", "type": "function",
+                                                                      "function": {"name": "read", "arguments": "{}"}}]},
+                  {"role": "tool", "tool_call_id": f"a{turn}", "content": content},
+                  {"role": "assistant", "content": f"Ответ {turn}"}]
+        store.save_turn(session_id, f"Вопрос {turn}", f"Ответ {turn}", [],
+                        {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14, "known": True, "requests": 1},
+                        stored, grounded=True)
+
+
+def test_context_view_shows_what_the_model_gets_turn_by_turn(tmp_path):
+    store = SessionStore(tmp_path / "history.sqlite3", full_turns=1, tool_chars=50)
+    session = store.create()
+    big = json.dumps({"ok": True, "data": {"text": "х" * 500}}, ensure_ascii=False)
+    save_tool_turns(store, session["id"], 2, big)
+    view = store.context_view(session["id"])
+    assert (view["full_turns"], view["tool_chars"]) == (1, 50)
+    assert view["system"]["role"] == "system" and view["system"]["content"]
+    old, last = view["turns"]
+    assert (old["number"], old["question"], old["kept_in_full"]) == (1, "Вопрос 0", False)
+    assert last["kept_in_full"] is True
+    # Сокращён только длинный результат инструмента; вопрос и ответ уходят как есть.
+    tool = next(message for message in old["messages"] if message["role"] == "tool")
+    assert tool["compacted"] is True and tool["full_chars"] == len(big) and tool["content"].endswith(COMPACTED_NOTE)
+    assert [message["compacted"] for message in last["messages"]] == [False] * 4
+    assert old["tokens"] < old["full_tokens"] and last["tokens"] == last["full_tokens"]
+    # Панель и индикатор в шапке показывают одну и ту же оценку, а сообщения — ровно те, что уйдут в модель.
+    assert view["context_tokens"] == store.get(session["id"])["context_tokens"]
+    sent = [{key: value for key, value in message.items() if key not in ("compacted", "full_chars")}
+            for turn in view["turns"] for message in turn["messages"]]
+    assert sent == store.history(session["id"])
+    assert store.context_view("missing") is None
+
+
+def test_context_endpoint_returns_the_view_with_the_budget(tmp_path):
+    from fastapi.testclient import TestClient
+    app = make_app(tmp_path)
+    store = app.state.store
+    session = store.create()
+    save_tool_turns(store, session["id"], 3, json.dumps({"ok": True, "data": {"text": "х" * 3000}}, ensure_ascii=False))
+    with TestClient(app) as client:
+        body = client.get(f"/api/sessions/{session['id']}/context").json()
+        assert [turn["kept_in_full"] for turn in body["turns"]] == [False, True, True]
+        assert body["context_budget"] > 0 and body["context_tokens"] == store.get(session["id"])["context_tokens"]
+        assert client.get("/api/sessions/missing/context").status_code == 404
+
+
 def test_old_history_database_is_migrated(tmp_path):
     path = tmp_path / "history.sqlite3"
     db = sqlite3.connect(path)
@@ -530,6 +579,13 @@ def with_verifier(app, provider):
                                                                        **kwargs)
 
 
+def verify_stream(client, url):
+    """События потоковой проверки ответа: [(имя, данные), …]."""
+    response = client.post(url)
+    assert response.status_code == 200 and response.headers["content-type"].startswith("text/event-stream")
+    return stream_events(response.text)
+
+
 def test_verify_saves_the_verdict_and_adds_its_cost(tmp_path):
     from fastapi.testclient import TestClient
     app = make_app(tmp_path)
@@ -543,13 +599,19 @@ def test_verify_saves_the_verdict_and_adds_its_cost(tmp_path):
         answer = client.get(f"/api/sessions/{session_id}").json()["messages"][1]
         assert answer["verification"] is None
         url = f"/api/sessions/{session_id}/messages/{answer['id']}/verify"
-        body = client.post(url).json()
+        events = verify_stream(client, url)
+        # Утверждение приходит отдельным событием до итога: интерфейс показывает ход проверки.
+        assert [name for name, _ in events] == ["claim", "done"]
+        assert events[0][1] == {"index": 0, "claim": {"text": "У Х25 хрома 23–27 %", "quote": "", "status": "confirmed",
+                                                      "node_id": "200", "evidence": "23.0–27.0 %"}}
+        body = events[-1][1]
+        assert body["message_id"] == answer["id"]
         assert (body["verification"]["verdict"], body["verification"]["percent"]) == ("подтверждён", 100)
         assert "У какой марки больше всего хрома?" in json.dumps(provider.requests[0], ensure_ascii=False)
         saved = client.get(f"/api/sessions/{session_id}").json()
         assert saved["messages"][1]["verification"]["claims"] == body["verification"]["claims"]
         assert saved["usage"]["total_tokens"] == body["session_usage"]["total_tokens"] == 20
-        again = client.post(url).json()  # повторная проверка заменяет вердикт, но расход копится
+        again = verify_stream(client, url)[-1][1]  # повторная проверка заменяет вердикт, но расход копится
         assert again["session_usage"]["total_tokens"] == 40
         assert client.get(f"/api/sessions/{session_id}").json()["usage"]["total_tokens"] == 40
 
@@ -566,8 +628,10 @@ def test_failed_verification_is_logged_and_not_saved(tmp_path, caplog):
         client.post(f"/api/sessions/{session_id}/chat", json={"message": "У какой марки больше всего хрома?"})
         answer = client.get(f"/api/sessions/{session_id}").json()["messages"][1]
         with caplog.at_level("WARNING", logger="materials_chat.web"):
-            response = client.post(f"/api/sessions/{session_id}/messages/{answer['id']}/verify")
-        assert response.status_code == 502 and "лимит" in response.json()["detail"]
+            events = verify_stream(client, f"/api/sessions/{session_id}/messages/{answer['id']}/verify")
+        # Дописанное утверждение успело прийти, затем — ошибка вместо итога.
+        assert [name for name, _ in events] == ["claim", "error"]
+        assert events[-1][1]["code"] == "verifier_truncated" and "лимит" in events[-1][1]["message"]
         assert any("verifier_truncated" in record.getMessage() for record in caplog.records)
         saved = client.get(f"/api/sessions/{session_id}").json()
         # Расход неудачной проверки не к чему привязать: вердикта нет, в диалог он не попадает.
@@ -595,9 +659,9 @@ def test_separate_verifier_model_gets_its_own_catalog_entry(tmp_path, monkeypatc
     app.state.agent_factory = scripted_agent([("Больше всего хрома у Х25: 23–27 %.", [FIND_ENTRY])])
     provider, seen = Provider(verdict_reply([])), []
 
-    def verifier(config, *args, model_info=None):
+    def verifier(config, *args, model_info=None, **kwargs):
         seen.append(model_info)
-        return verify_answer(config, *args, model=provider.model(config), model_info=model_info)
+        return verify_answer(config, *args, model=provider.model(config), model_info=model_info, **kwargs)
 
     app.state.verifier = verifier
     with TestClient(app) as client:
@@ -605,7 +669,7 @@ def test_separate_verifier_model_gets_its_own_catalog_entry(tmp_path, monkeypatc
         client.post(f"/api/sessions/{session_id}/chat", json={"message": "У какой марки больше всего хрома?"})
         answer = client.get(f"/api/sessions/{session_id}").json()["messages"][1]
         url = f"/api/sessions/{session_id}/messages/{answer['id']}/verify"
-        usage = [client.post(url).json()["verification"]["usage"] for _ in range(2)]
+        usage = [verify_stream(client, url)[-1][1]["verification"]["usage"] for _ in range(2)]
     assert asked == ["fake", "other/model"]  # каталог проверяющей модели запрошен один раз
     assert seen[0] is seen[1] and usage[0]["currency"] == "RUB"
     if listed:

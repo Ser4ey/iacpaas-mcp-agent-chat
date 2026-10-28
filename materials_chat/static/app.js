@@ -4,16 +4,18 @@
  * Модули:
  *   api.js       — запросы к серверу и чтение потока SSE;
  *   markdown.js  — безопасный рендер ответа модели (только DOM-узлы);
- *   checks.js    — строка сверки чисел и подсветка ненайденных;
+ *   checks.js    — сверка чисел, ход и вердикт проверки ответа, переход по цитатам;
  *   trace.js     — журнал вызовов MCP-инструментов;
  *   data-view.js — раздел «Данные»;
+ *   context-view.js — панель «Что видит модель» (история, которая уйдёт в модель);
  *   format.js    — числа, склонения, рубли, даты.
  * Здесь — состояние, разделы, список диалогов, отправка вопроса и индикатор расхода.
  */
-import { api, streamChat } from './api.js';
+import { api, streamChat, streamVerify } from './api.js';
+import { renderContextView } from './context-view.js';
 import { renderDataView, renderIndexStatus } from './data-view.js';
 import { formatCompact, formatCost, formatNumber, formatShortDate, plural } from './format.js';
-import { highlightNumbers, numberCheckNode, verdictNode } from './checks.js';
+import { formatElapsed, highlightNumbers, numberCheckNode, progressNode, verdictNode } from './checks.js';
 import { renderMarkdown } from './markdown.js';
 import { ToolLog, normalizeTrace, toolActivity } from './trace.js';
 
@@ -204,7 +206,7 @@ function renderMeter() {
       el('span', 'meter-budget', ` из ${formatCompact(budget)}`),
     );
     context.title = `Контекст следующего вопроса: ${approx}${formatNumber(tokens)} из ${formatNumber(budget)} токенов `
-      + `(${(share * 100).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} %).`;
+      + `(${(share * 100).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} %). Нажмите, чтобы посмотреть, что уйдёт в модель.`;
   }
 
   const usage = session?.usage ?? {};
@@ -434,6 +436,8 @@ function createAnswerView(turn) {
     verification: null,
     verifying: false,
     verifyError: '',
+    progress: null,       // ход проверки: {claims, startedAt}
+    verdictOpen: false,   // список утверждений раскрыт сразу после проверки, у сохранённых — свёрнут
     truncated: false,
     done: false,
     renderQueued: false,
@@ -493,20 +497,38 @@ function copyButton(view) {
   return button;
 }
 
+/** Заметная кнопка проверки ответа: важное действие, поэтому в цвет акцента, а не тихой ссылкой. */
 function verifyButton(view) {
-  const button = el('button', 'link-button', view.verifying ? 'Проверяю…' : 'Проверить');
+  const label = view.verifying ? 'Проверяю…' : view.verification ? 'Проверить снова' : 'Проверить';
+  const button = el('button', 'verify-button', label);
   button.type = 'button';
   button.disabled = view.verifying;
+  button.prepend(view.verifying ? el('span', 'verify-spinner') : shieldIcon());
   button.title = 'Сверить утверждения ответа с данными из базы; проверка оплачивается отдельно';
   button.addEventListener('click', () => verifyAnswer(view));
   return button;
 }
 
-/** Блок вердикта под строкой расхода; повторная проверка заменяет прежний блок. */
+function shieldIcon() {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', 'M8 1.8 3 3.6v4c0 3 2.1 5.3 5 6.6 2.9-1.3 5-3.6 5-6.6v-4L8 1.8ZM5.8 8l1.6 1.6 3-3.2');
+  svg.append(path);
+  return svg;
+}
+
+/** Блок под строкой расхода: ход проверки, затем вердикт; повторная проверка заменяет прежний блок. */
 function renderVerdict(view) {
+  const answer = view.body;
   if (view.verifyError) view.verdict.replaceChildren(el('p', 'answer-error', `Не удалось проверить: ${view.verifyError}`));
-  else if (view.verification) view.verdict.replaceChildren(verdictNode(view.verification));
-  else view.verdict.replaceChildren();
+  else if (view.progress) {
+    const elapsed = performance.now() - view.progress.startedAt;
+    view.verdict.replaceChildren(progressNode(view.progress, { answer, elapsed }));
+  } else if (view.verification) {
+    view.verdict.replaceChildren(verdictNode(view.verification, { answer, open: view.verdictOpen }));
+  } else view.verdict.replaceChildren();
 }
 
 async function verifyAnswer(view) {
@@ -515,25 +537,64 @@ async function verifyAnswer(view) {
   const sessionId = session.id;
   view.verifying = true;
   view.verifyError = '';
+  view.progress = { claims: [], startedAt: performance.now() };
   renderAnswerMeta(view);
+  renderVerdict(view);
+  // Блок хода проверки появляется под ответом — часто ниже края экрана.
+  const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  view.verdict.scrollIntoView({ block: 'nearest', behavior: still ? 'auto' : 'smooth' });
+  // Секундомер обновляет только своё поле: список утверждений при этом не перерисовывается.
+  const timer = setInterval(() => {
+    const node = view.verdict.querySelector('.verdict-timer');
+    if (node && view.progress) node.textContent = formatElapsed(performance.now() - view.progress.startedAt);
+  }, 1000);
+  let finished = false;
   try {
-    const path = `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(view.messageId)}/verify`;
-    const result = await api(path, { method: 'POST', body: '{}' });
-    view.verification = result.verification;
-    // Диалог за время запроса могли сменить: тогда обновляем только вид этого ответа.
-    if (state.session?.id === sessionId) {
-      state.session.usage = result.session_usage ?? state.session.usage;
-      const saved = state.session.messages.find((m) => m.id === view.messageId);
-      if (saved) saved.verification = result.verification;
-      renderMeter();
-    }
-    loadSessions().catch(() => {}); // стоимость диалога в списке
+    await streamVerify(sessionId, view.messageId, (name, data) => {
+      if (name === 'claim') {
+        view.progress.claims[data.index] = data.claim;
+        renderVerdict(view);
+      } else if (name === 'done') {
+        finished = true;
+        view.verification = data.verification;
+        view.verdictOpen = true;
+        // Диалог за время запроса могли сменить: тогда обновляем только вид этого ответа.
+        if (state.session?.id === sessionId) {
+          state.session.usage = data.session_usage ?? state.session.usage;
+          const saved = state.session.messages.find((m) => m.id === view.messageId);
+          if (saved) saved.verification = data.verification;
+          renderMeter();
+        }
+        loadSessions().catch(() => {}); // стоимость диалога в списке
+      } else if (name === 'error') {
+        finished = true;
+        view.verifyError = data.message;
+      }
+    });
+    if (!finished) view.verifyError = 'Соединение прервалось до конца проверки. Повторите её.';
   } catch (error) {
     view.verifyError = error.message;
   } finally {
+    clearInterval(timer);
     view.verifying = false;
+    view.progress = null;
     renderAnswerMeta(view);
     renderVerdict(view);
+  }
+}
+
+/** Панель «Что видит модель»: история диалога в том виде, в каком она уйдёт в модель со следующим вопросом. */
+async function openContextView() {
+  const session = state.session;
+  if (!session) return;
+  const dialog = $('context-dialog');
+  const body = $('context-body');
+  body.replaceChildren(el('p', 'context-note', 'Загружаю…'));
+  if (!dialog.open) dialog.showModal();
+  try {
+    renderContextView(body, await api(`/api/sessions/${encodeURIComponent(session.id)}/context`));
+  } catch (error) {
+    body.replaceChildren(el('p', 'answer-error', `Не удалось загрузить: ${error.message}`));
   }
 }
 
@@ -749,6 +810,12 @@ function bindEvents() {
   $('stop-button').addEventListener('click', () => state.controller?.abort());
   $('new-chat').addEventListener('click', () => newSession().catch(showError));
   $('dismiss-error').addEventListener('click', hideError);
+  $('meter-context').addEventListener('click', () => openContextView());
+  $('close-context').addEventListener('click', () => $('context-dialog').close());
+  // Щелчок по затемнению вокруг панели закрывает её; Esc закрывает <dialog> сам.
+  $('context-dialog').addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) event.currentTarget.close();
+  });
 
   $('open-sidebar').addEventListener('click', openSidebar);
   $('close-sidebar').addEventListener('click', () => closeSidebar({ restoreFocus: true }));

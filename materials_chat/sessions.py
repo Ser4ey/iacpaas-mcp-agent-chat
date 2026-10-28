@@ -106,20 +106,46 @@ class SessionStore:
 
     def history(self, session_id: str) -> list[dict]:
         """Сообщения для модели. Последние full_turns ходов — полностью, более старые — сжато."""
-        full_turns, tool_chars = self.full_turns, self.tool_chars
+        return [message for sent, _ in self._turns(session_id) for message in sent]
+
+    def _turns(self, session_id: str) -> list[tuple[list[dict], list[dict]]]:
+        """Ходы диалога: (сообщения, как они уйдут в модель; как они сохранены)."""
         with self._lock:
             rows = self.db.execute("SELECT role,content,model_messages FROM messages WHERE session_id=? ORDER BY rowid",
                                    (session_id,)).fetchall()
-        turns = sum(1 for row in rows if row["role"] == "assistant")
-        result, turn = [], 0
+        turns, current = [], []
         for row in rows:
-            stored = json.loads(row["model_messages"]) or [{"role": row["role"], "content": row["content"]}]
+            current.extend(json.loads(row["model_messages"]) or [{"role": row["role"], "content": row["content"]}])
             if row["role"] == "assistant":
-                turn += 1
-                if turn <= turns - full_turns:
-                    stored = compact_turn(stored, tool_chars)
-            result.extend(stored)
-        return result
+                turns.append(current)
+                current = []
+        older = len(turns) - self.full_turns
+        result = [(compact_turn(turn, self.tool_chars) if index < older else turn, turn)
+                  for index, turn in enumerate(turns)]
+        # Вопрос без ответа save_turn не оставляет; если он всё же есть, он уходит как есть.
+        return result + [(current, current)] if current else result
+
+    def context_view(self, session_id: str) -> dict | None:
+        """Что уйдёт в модель со следующим вопросом, по ходам: для панели «Что видит модель».
+
+        У каждого сообщения — compacted (результат инструмента обрезан) и full_chars (длина сохранённого текста).
+        """
+        with self._lock:
+            if self.db.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone() is None:
+                return None
+        system = {"role": "system", "content": SYSTEM_PROMPT}
+        turns = []
+        for number, (sent, stored) in enumerate(self._turns(session_id), start=1):
+            messages = [{**message, "compacted": message.get("content") != original.get("content"),
+                         "full_chars": len(original.get("content") or "")}
+                        for message, original in zip(sent, stored)]
+            question = next((message.get("content", "") for message in sent if message.get("role") == "user"), "")
+            turns.append({"number": number, "question": question, "kept_in_full": sent is stored,
+                          "tokens": self.estimate_tokens(sent), "full_tokens": self.estimate_tokens(stored),
+                          "messages": messages})
+        return {"system": {**system, "tokens": self.estimate_tokens([system])}, "turns": turns,
+                "full_turns": self.full_turns, "tool_chars": self.tool_chars,
+                "context_tokens": self.estimate_tokens([system, *self.history(session_id)])}
 
     def traces(self, session_id: str) -> list[dict]:
         """Записи журнала инструментов всех ответов диалога по порядку: данные для сверки чисел."""

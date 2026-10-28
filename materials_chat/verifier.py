@@ -16,6 +16,7 @@ from .usage import request_usage
 
 class Claim(BaseModel):
     text: str = Field(min_length=1)
+    quote: str = ""  # дословный фрагмент ответа: по нему интерфейс находит место утверждения в тексте
     status: Literal["confirmed", "not_in_data", "contradicted"]
     node_id: str | None = None
     evidence: str = ""
@@ -83,9 +84,31 @@ def parse_report(message) -> VerdictReport:
         raise ProviderError(BAD_OUTPUT, "verifier_bad_output") from None
 
 
+def announce_claims(message, shown: int, on_claim) -> int:
+    """Сообщить о дописанных утверждениях, пока отчёт ещё приходит; возвращает, сколько уже сообщено.
+
+    Последнее утверждение в частично разобранном отчёте может быть недописано, поэтому оно ждёт следующего.
+    """
+    args = message.tool_calls[0]["args"] if message.tool_calls else {}
+    claims = args.get("claims") if isinstance(args, dict) else None
+    if not isinstance(claims, list):
+        return shown
+    for index in range(shown, len(claims) - 1):
+        try:
+            claim = Claim.model_validate(claims[index])
+        except ValidationError:
+            break
+        on_claim(index, claim.model_dump())
+        shown = index + 1
+    return shown
+
+
 async def verify_answer(settings, question: str, answer: str, traces: list[dict], model=None,
-                        model_info: dict | None = None) -> dict:
-    """Проверить ответ по данным диалога; ошибки — ProviderError с кодом для HTTP-слоя."""
+                        model_info: dict | None = None, on_claim=None) -> dict:
+    """Проверить ответ по данным диалога; ошибки — ProviderError с кодом для HTTP-слоя.
+
+    on_claim(index, claim) вызывается для каждого утверждения по мере того, как модель его дописывает.
+    """
     if not successful_data(traces):
         raise ProviderError("В диалоге нет данных из базы — проверять ответ не с чем.", "no_data")
     messages = verifier_messages(question, answer, traces)
@@ -95,22 +118,27 @@ async def verify_answer(settings, question: str, answer: str, traces: list[dict]
         raise ProviderError("Данные диалога не помещаются в окно контекста проверяющего.", "context_limit")
     name = verifier_model_name(settings)
     model = model or create_chat_model(settings, model=name, max_tokens=VERIFIER_MAX_TOKENS)
+    message, shown = None, 0
     try:
-        # Стриминг нужен, чтобы RouterAIChat сохранил стоимость провайдера в provider_usage.
-        chunks = [chunk async for chunk in model.bind_tools([REPORT_TOOL], tool_choice="required").astream(messages)]
+        # Стриминг нужен, чтобы RouterAIChat сохранил стоимость провайдера в provider_usage,
+        # и чтобы интерфейс видел утверждения по одному, а не весь отчёт в конце.
+        async for chunk in model.bind_tools([REPORT_TOOL], tool_choice="required").astream(messages):
+            message = chunk if message is None else message + chunk
+            if on_claim:
+                shown = announce_claims(message, shown, on_claim)
     except Exception as error:
         problem = as_provider_error(error, getattr(settings, "provider_name", "API модели"))
         raise problem or error
-    if not chunks:
+    if message is None:
         raise ProviderError(BAD_OUTPUT, "verifier_bad_output")
-    message = chunks[0]
-    for chunk in chunks[1:]:
-        message += chunk
     if message.response_metadata.get("finish_reason") == "length":
         # Обрезанные аргументы LangChain дочитывает как неполный JSON: часть утверждений пропала бы молча.
         raise ProviderError("Проверяющий не уложился в лимит длины ответа. Проверка не выполнена — "
                             "повторите её или задайте вопрос уже.", "verifier_truncated")
     report = parse_report(message)
+    if on_claim:
+        for index, claim in enumerate(report.claims[shown:], start=shown):
+            on_claim(index, claim.model_dump())
     return {**summarize(report.claims), "claims": [claim.model_dump() for claim in report.claims],
             "usage": request_usage(message.response_metadata.get("provider_usage"), model_info), "model": name,
             "created_at": datetime.now(timezone.utc).isoformat()}

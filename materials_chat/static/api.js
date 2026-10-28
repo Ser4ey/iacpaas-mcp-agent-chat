@@ -49,6 +49,15 @@ export async function streamChat(sessionId, message, signal, onEvent) {
   await readEvents(response.body, onEvent);
 }
 
+/** Проверка ответа: поток claim (утверждение, как только готово), затем done с вердиктом или error. */
+export async function streamVerify(sessionId, messageId, onEvent) {
+  const path = `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/verify`;
+  const response = await fetch(path, { method: 'POST' });
+  if (!response.ok) throw await errorFromResponse(response);
+  if (!response.body) throw new Error('Браузер не поддерживает потоковый ответ.');
+  await readEvents(response.body, onEvent);
+}
+
 /** Разбор формата SSE: блоки «event: …\ndata: …», разделённые пустой строкой. */
 async function readEvents(body, onEvent) {
   const reader = body.getReader();

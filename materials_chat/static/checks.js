@@ -1,5 +1,6 @@
 /*
- * Сверка ответа с данными: строка сверки чисел, подсветка ненайденных чисел и блок вердикта проверки.
+ * Сверка ответа с данными: строка сверки чисел, подсветка ненайденных чисел, ход проверки и блок вердикта
+ * с цитатами, ведущими к месту утверждения в ответе.
  * Только DOM-узлы и textContent, как в markdown.js, — innerHTML не используется.
  */
 import { formatCost, plural } from './format.js';
@@ -27,10 +28,14 @@ export function highlightNumbers(container, numbers) {
   const wanted = [...new Set(numbers)].filter(Boolean).sort((a, b) => b.length - a.length);
   if (!wanted.length) return;
   // Узлы собираем заранее: во время обхода мы сами меняем дерево.
+  textNodes(container).forEach((node) => markInTextNode(node, wanted));
+}
+
+function textNodes(container) {
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
   const nodes = [];
   while (walker.nextNode()) nodes.push(walker.currentNode);
-  nodes.forEach((node) => markInTextNode(node, wanted));
+  return nodes;
 }
 
 function markInTextNode(node, wanted) {
@@ -93,25 +98,83 @@ const CLAIM_STATUS = {
   contradicted: 'противоречит данным',
 };
 
-/** Блок вердикта проверки: итог, расход, раскрывающийся список утверждений. */
-export function verdictNode(verification) {
+const VERDICT_TONE = { 'подтверждён': 'ok', 'частично подтверждён': 'partial', 'не подтверждён': 'bad' };
+
+/** Блок вердикта проверки: итог с цветной плашкой, доли статусов, расход, список утверждений с цитатами. */
+export function verdictNode(verification, { answer = null, open = false } = {}) {
   const root = document.createElement('div');
   root.className = 'answer-verdict';
   const claims = verification.claims ?? [];
   const total = verification.total ?? claims.length;
-  const summary = [];
-  if (total > 0) {
-    const percent = typeof verification.percent === 'number' ? ` (${verification.percent} %)` : '';
-    const count = plural(total, ['утверждения', 'утверждений', 'утверждений']);
-    summary.push(`Подтверждено ${verification.confirmed} из ${count}${percent}`);
+  const head = document.createElement('div');
+  head.className = 'verdict-head';
+  if (verification.verdict) {
+    head.append(span(`verdict-badge is-${VERDICT_TONE[verification.verdict] ?? 'neutral'}`, verification.verdict));
   }
-  if (verification.verdict) summary.push(verification.verdict);
-  root.append(span('verdict-summary', summary.join(' · ')));
+  if (total > 0) {
+    const percent = typeof verification.percent === 'number' ? ` (${verification.percent} %)` : '';
+    const count = plural(total, ['утверждения', 'утверждений', 'утверждений']);
+    head.append(span('verdict-summary', `Подтверждено ${verification.confirmed} из ${count}${percent}`));
+  }
+  root.append(head);
+  if (claims.length) root.append(statusBar(claims), statusCounts(claims));
 
   const usage = usageLine(verification.usage);
   if (usage) root.append(span('verdict-usage', usage));
-  if (claims.length) root.append(claimsList(claims));
+  if (claims.length) root.append(claimsList(claims, { answer, open }));
   return root;
+}
+
+/** Ход проверки: что делает проверяющий, сколько прошло времени и утверждения по мере готовности. */
+export function progressNode(progress, { answer = null, elapsed = 0 } = {}) {
+  const root = document.createElement('div');
+  root.className = 'answer-verdict is-running';
+  root.setAttribute('role', 'status');
+  const claims = progress.claims.filter(Boolean);
+  const head = document.createElement('div');
+  head.className = 'verdict-head';
+  const stage = claims.length
+    ? `Проверено утверждений: ${claims.length}…`
+    : 'Проверяющий читает ответ и данные из базы…';
+  head.append(span('verdict-spinner', ''), span('verdict-summary', stage), span('verdict-timer', formatElapsed(elapsed)));
+  const bar = document.createElement('div');
+  bar.className = 'verdict-bar is-running';
+  root.append(head, bar);
+  if (claims.length) root.append(statusCounts(claims), claimsList(claims, { answer, open: true }));
+  return root;
+}
+
+/** «7 с», «1 мин 05 с» — время с начала проверки. */
+export function formatElapsed(ms) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds} с`;
+  return `${Math.floor(seconds / 60)} мин ${String(seconds % 60).padStart(2, '0')} с`;
+}
+
+function countStatuses(claims) {
+  const counts = Object.fromEntries(Object.keys(CLAIM_STATUS).map((status) => [status, 0]));
+  for (const claim of claims) if (claim.status in counts) counts[claim.status] += 1;
+  return counts;
+}
+
+/** Полоса долей: зелёная — подтверждено, жёлтая — нет в данных, красная — противоречит. */
+function statusBar(claims) {
+  const bar = document.createElement('div');
+  bar.className = 'verdict-bar';
+  for (const [status, count] of Object.entries(countStatuses(claims))) {
+    if (!count) continue;
+    const part = span(`is-${status}`, '');
+    part.style.flexGrow = String(count);
+    bar.append(part);
+  }
+  return bar;
+}
+
+function statusCounts(claims) {
+  const parts = Object.entries(countStatuses(claims))
+    .filter(([, count]) => count)
+    .map(([status, count]) => `${count} — ${CLAIM_STATUS[status]}`);
+  return span('verdict-counts', parts.join(' · '));
 }
 
 /** Расход самой проверки («Проверка: 1 234 токена · 0,12 ₽»); пусто, если расход неизвестен. */
@@ -124,22 +187,139 @@ function usageLine(usage) {
   return parts.length ? `Проверка: ${parts.join(' · ')}` : '';
 }
 
-function claimsList(claims) {
+function claimsList(claims, { answer, open }) {
   const details = document.createElement('details');
   details.className = 'verdict-claims';
+  details.open = Boolean(open);
   const title = document.createElement('summary');
-  title.textContent = 'Утверждения';
-  const list = document.createElement('ul');
-  for (const claim of claims) {
-    const item = document.createElement('li');
-    item.className = `claim is-${claim.status}`;
-    item.append(span('claim-status', CLAIM_STATUS[claim.status] ?? claim.status), span('claim-text', claim.text));
-    const support = [claim.node_id ? `вершина ${claim.node_id}` : '', claim.evidence].filter(Boolean).join(': ');
-    if (support) item.append(span('claim-support', support));
-    list.append(item);
+  title.textContent = `Утверждения (${claims.length})`;
+  const items = claims.map((claim) => claimItem(claim, answer));
+  details.append(title);
+  if (items.some((item) => item.querySelector('button.claim-quote'))) {
+    details.append(span('verdict-hint', 'Нажмите на цитату, чтобы перейти к этому месту в ответе.'));
   }
-  details.append(title, list);
+  const list = document.createElement('ul');
+  list.append(...items);
+  details.append(list);
   return details;
+}
+
+function claimItem(claim, answer) {
+  const item = document.createElement('li');
+  item.className = `claim is-${claim.status}`;
+  item.append(span('claim-status', CLAIM_STATUS[claim.status] ?? claim.status));
+  const quote = (claim.quote ?? '').trim();
+  if (quote && answer && findQuote(answer, quote)) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'claim-quote';
+    button.textContent = `«${quote}»`;
+    button.title = 'Показать это место в ответе';
+    button.addEventListener('click', () => revealQuote(answer, quote, claim.status));
+    item.append(button);
+  } else if (quote) {
+    const node = span('claim-quote is-missing', `«${quote}»`);
+    node.title = 'Этот фрагмент не найден в тексте ответа дословно';
+    item.append(node);
+  }
+  if (claim.text && claim.text !== quote) item.append(span('claim-text', claim.text));
+  const support = [claim.node_id ? `вершина ${claim.node_id}` : '', claim.evidence].filter(Boolean).join(': ');
+  if (support) item.append(span('claim-support', support));
+  return item;
+}
+
+// Цитаты проверяющего: поиск места утверждения в тексте ответа и переход к нему.
+
+const QUOTE_FOLD = {
+  '«': '"', '»': '"', '„': '"', '“': '"', '”': '"', '‘': "'", '’': "'",
+  '–': '-', '—': '-', '−': '-', '‑': '-', 'ё': 'е', 'Ё': 'е',
+};
+const QUOTE_DROPPED = new Set(['*', '`', '|', '#']); // разметка Markdown, которой нет в отрисованном тексте
+const QUOTE_EDGES = /^[\s"'«»“”„….]+|[\s"'«»“”„….]+$/g;
+const QUOTE_BLOCKS = 'p, li, td, th, h1, h2, h3, h4, h5, h6, pre, blockquote';
+const QUOTE_HIGHLIGHT_MS = 4000;
+
+/** Символ для сравнения: без регистра, любой пробел — пробел, тире и кавычки — одного вида; '' — пропустить. */
+function foldChar(char) {
+  if (/\s/.test(char)) return ' ';
+  if (QUOTE_DROPPED.has(char)) return '';
+  const folded = QUOTE_FOLD[char] ?? char.toLowerCase();
+  return folded.length === 1 ? folded : char;
+}
+
+function foldQuote(quote) {
+  let text = '';
+  for (const char of String(quote ?? '').replace(QUOTE_EDGES, '')) {
+    const folded = foldChar(char);
+    if (folded && !(folded === ' ' && text.endsWith(' '))) text += folded;
+  }
+  return text.trim();
+}
+
+/**
+ * Где в тексте ответа стоит цитата. parts — текстовые узлы по порядку: {text, block}; между узлами
+ * разных блоков (абзацы, ячейки таблицы) считается пробел. Возвращает {start, end} как [номер узла, смещение]
+ * (end — после последнего символа) или null, если цитаты нет или она короче трёх символов.
+ */
+export function locateQuote(parts, quote) {
+  const wanted = foldQuote(quote);
+  if (wanted.length < 3) return null;
+  let text = '';
+  const points = []; // для каждого символа text — откуда он: [номер узла, смещение]; null — пробел между блоками
+  parts.forEach((part, index) => {
+    if (index > 0 && part.block !== parts[index - 1].block && text && !text.endsWith(' ')) {
+      text += ' ';
+      points.push(null);
+    }
+    for (let offset = 0; offset < part.text.length; offset += 1) {
+      const folded = foldChar(part.text[offset]);
+      if (!folded || (folded === ' ' && (!text || text.endsWith(' ')))) continue;
+      text += folded;
+      points.push([index, offset]);
+    }
+  });
+  const at = text.indexOf(wanted);
+  if (at < 0) return null;
+  const [endPart, endOffset] = points[at + wanted.length - 1];
+  return { start: points[at], end: [endPart, endOffset + 1] };
+}
+
+/** Range цитаты в отрисованном ответе или null. */
+export function findQuote(container, quote) {
+  const nodes = textNodes(container);
+  const parts = nodes.map((node) => ({ text: node.nodeValue, block: node.parentElement?.closest(QUOTE_BLOCKS) ?? container }));
+  const found = locateQuote(parts, quote);
+  if (!found) return null;
+  const range = document.createRange();
+  range.setStart(nodes[found.start[0]], found.start[1]);
+  range.setEnd(nodes[found.end[0]], found.end[1]);
+  return range;
+}
+
+let quoteTimer = 0;
+let flashed = null;
+
+/** Прокрутить к цитате и на несколько секунд подсветить её цветом статуса; false — цитаты в тексте нет. */
+export function revealQuote(container, quote, status) {
+  const range = findQuote(container, quote);
+  if (!range) return false;
+  const kind = status in CLAIM_STATUS ? status : 'not_in_data';
+  const target = range.startContainer.parentElement?.closest(QUOTE_BLOCKS) ?? container;
+  const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  target.scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'center' });
+  clearTimeout(quoteTimer);
+  flashed?.classList.remove('quote-flash');
+  if (globalThis.CSS?.highlights && typeof Highlight === 'function') {
+    // Custom Highlight API красит ровно цитату, не трогая DOM ответа (подсветку чисел и разметку).
+    for (const name of Object.keys(CLAIM_STATUS)) CSS.highlights.delete(`quote-${name}`);
+    CSS.highlights.set(`quote-${kind}`, new Highlight(range));
+    quoteTimer = setTimeout(() => CSS.highlights.delete(`quote-${kind}`), QUOTE_HIGHLIGHT_MS);
+  } else {
+    flashed = target;
+    target.classList.add('quote-flash');
+    quoteTimer = setTimeout(() => target.classList.remove('quote-flash'), QUOTE_HIGHLIGHT_MS);
+  }
+  return true;
 }
 
 function span(className, text) {

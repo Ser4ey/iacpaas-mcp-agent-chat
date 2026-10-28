@@ -2,13 +2,14 @@
 import asyncio
 import json
 
+import httpx2
 import pytest
 
 from materials_chat import verifier
 from materials_chat.openrouter import ProviderError
 from materials_chat.sessions import SessionStore
 from materials_chat.verifier import Claim, successful_data, summarize, verifier_model_name, verify_answer
-from test_agent_backend import PRICES, Provider, event, settings, text_reply, verdict_reply
+from test_agent_backend import PRICES, Provider, event, settings, sse, text_reply, verdict_reply
 
 META = {"resource_id": "materials", "resource_title": "Справочник по материалам", "resource_path": "Мой Фонд/…",
         "indexed_at": "2026-10-18T09:59:24+00:00", "served_from": "local_index", "last_sync_error": None}
@@ -18,14 +19,62 @@ TRACE = [{"id": "t1", "name": "find_materials", "is_error": False,
               {"node_id": "200", "name": "Х25", "contents": {"Cr": {"low": 23.0, "high": 27.0, "text": "23.0–27.0 %"}}}]}}},
          {"id": "t2", "name": "get_subgraph", "arguments": {}, "is_error": True,
           "result": {"ok": False, "error": {"code": "NODE_NOT_FOUND", "message": "нет вершины"}}}]
-CLAIMS = [{"text": "У Х25 хрома 23–27 %", "status": "confirmed", "node_id": "200", "evidence": "23.0–27.0 %"},
-          {"text": "Х25 — нержавеющая сталь", "status": "not_in_data", "node_id": None, "evidence": ""},
-          {"text": "Хрома больше 20 % у одной марки", "status": "confirmed", "node_id": None, "evidence": "total: 1"}]
+CLAIMS = [{"text": "У Х25 хрома 23–27 %", "quote": "хрома 23–27 %", "status": "confirmed", "node_id": "200",
+           "evidence": "23.0–27.0 %"},
+          {"text": "Х25 — нержавеющая сталь", "quote": "нержавеющая сталь Х25", "status": "not_in_data",
+           "node_id": None, "evidence": ""},
+          {"text": "Хрома больше 20 % у одной марки", "quote": "только у одной марки", "status": "confirmed",
+           "node_id": None, "evidence": "total: 1"}]
 
 
 def verify(provider, config, traces=TRACE, **kwargs):
     return asyncio.run(verify_answer(config, "Где хрома больше 20 %?", "Ответ про Х25.", traces,
                                      model=provider.model(config), **kwargs))
+
+
+def streamed_verdict(claims, pieces=9):
+    """Отчёт submit_verdict, аргументы которого приходят кусками, как в настоящем потоке."""
+    text = json.dumps({"claims": claims}, ensure_ascii=False)
+    size = -(-len(text) // pieces)
+    parts = [text[start:start + size] for start in range(0, len(text), size)]
+    first = {"index": 0, "id": "verdict", "type": "function",
+             "function": {"name": "submit_verdict", "arguments": parts[0]}}
+    return ([event({"role": "assistant", "tool_calls": [first]})]
+            + [event({"tool_calls": [{"index": 0, "function": {"arguments": part}}]}) for part in parts[1:]]
+            + [event({}, "tool_calls")])
+
+
+class TrickleProvider(Provider):
+    """Двойник, который отдаёт поток по одному событию и считает, сколько уже отправлено."""
+
+    sent = 0
+
+    def respond(self, number, events):
+        blocks = [block + "\n\n" for block in sse(events).split("\n\n") if block]
+
+        async def body():
+            for block in blocks:
+                self.sent += 1
+                yield block.encode()
+
+        self.total = len(blocks)
+        return httpx2.Response(200, content=body(), headers={"Content-Type": "text/event-stream"})
+
+
+def test_claims_arrive_one_by_one_while_the_report_streams():
+    provider, seen = TrickleProvider(streamed_verdict(CLAIMS)), []
+    report = verify(provider, settings(), on_claim=lambda index, claim: seen.append((index, claim, provider.sent)))
+    assert [(index, claim) for index, claim, _ in seen] == list(enumerate(CLAIMS))
+    # Первое утверждение показано, пока отчёт ещё приходит, а не после него.
+    assert seen[0][2] < provider.total
+    assert report["claims"] == CLAIMS
+
+
+def test_claim_without_quote_is_kept():
+    claim = {key: value for key, value in CLAIMS[0].items() if key != "quote"}
+    report = verify(Provider(verdict_reply([claim])), settings())
+    assert report["claims"] == [{**claim, "quote": ""}]
+    assert "quote" in verifier.VERIFIER_PROMPT and "дословн" in verifier.VERIFIER_PROMPT
 
 
 def test_verdict_counts_claims_and_cost():
