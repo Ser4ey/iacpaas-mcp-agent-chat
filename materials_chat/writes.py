@@ -125,7 +125,11 @@ class WriteService:
                    "update_concept": self._update_concept}.get(operation)
         if handler is None:
             return fail("INVALID_ARGUMENTS", "operation: create_folder, create_resource или update_concept.")
-        target = str(request.get("path") or request.get("folder_path") or request.get("parent_path") or "")
+        if operation == "update_concept":
+            target = str(request.get("path") or "")
+        else:  # итоговый путь новой папки или ресурса: родитель / имя
+            parent = str(request.get("folder_path") or request.get("parent_path") or "").strip()
+            target = " / ".join(part for part in (parent, str(request.get("name") or "").strip()) if part)
         return await self._run(operation, target, lambda: handler(request, confirm))
 
     async def delete(self, path, mode: str, confirm: Confirm) -> ToolResult:
