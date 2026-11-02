@@ -31,6 +31,20 @@ def search_terms(text: str) -> list[str]:
     return result
 
 
+def query_stem(term: str) -> str:
+    """Основа прилагательного в запросе — к основе существительного: «алюминиев» → «алюмин», «железн» → «желез».
+
+    Только для запроса: поиск по префиксу, поэтому более короткая основа находит и «алюминия», и «алюминий».
+    Индекс при этом не меняется.
+    """
+    if re.fullmatch(r"[а-я]+", term):
+        if len(term) >= 7 and term.endswith(("иев", "ев", "ов")):
+            return re.sub(r"(иев|ев|ов)$", "", term)
+        if len(term) >= 6 and term.endswith("н") and term[-2] not in "аеиоуыэюя":
+            return term[:-1]
+    return term
+
+
 def node_from_raw(resource_id: str, raw: dict, path: str) -> dict:
     """Вершина universal JSON в том же виде, в каком её отдаёт индекс."""
     return {"resource_id": resource_id, "node_id": str(raw.get("id")),
@@ -180,7 +194,7 @@ class GraphStore:
             db.execute("UPDATE resources SET last_error=? WHERE resource_id=?", (message, resource_id))
 
     def search(self, query: str, resource_ids: list[str], limit: int, offset: int) -> dict:
-        terms = list(dict.fromkeys(search_terms(query)))[:8]
+        terms = list(dict.fromkeys(query_stem(term) for term in search_terms(query)))[:8]
         if not terms:
             return {"hits": [], "total": 0, "match_mode": "empty_query"}
         slots = ",".join("?" for _ in resource_ids)

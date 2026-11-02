@@ -84,3 +84,12 @@ def test_no_data_and_no_numbers():
     assert check_numbers("Хром — 17 %.", "Хром?", [FAILED])["status"] == "no_data"
     assert check_numbers("Здравствуйте! Спросите о сплавах.", "Привет", [SEARCH])["status"] == "no_numbers"
     assert check_numbers("Вы спрашивали про 20 %.", "Больше 20 %?", [SEARCH])["status"] == "no_numbers"
+
+
+def test_platform_datetime_and_counts_are_not_flagged():
+    traces = [{"name": "get_subgraph", "arguments": {"path": "Демо агента / Мои свойства"},
+               "result": {"ok": True, "data": {"total_within_depth": 5, "nodes": []}}},
+              {"name": "count_graph", "arguments": {"resource_id": "properties", "concept": "Свойство"},
+               "result": {"ok": True, "data": {"count": 28, "nodes": 230}}}]
+    answer = "Ресурс прочитан: 5 вершин, изменён 02.11.2026-19:29:24 (в 19:29). В базе 28 свойств."
+    assert check_numbers(answer, "Прочитай его", traces)["unconfirmed"] == []

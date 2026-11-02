@@ -221,3 +221,10 @@ def test_iron_above_five_percent_is_one_call_with_exact_total(service, ranges):
 def test_how_many_by_concept_is_one_call(service, resource_id, concept, count):
     result = service.count_graph(resource_id, None, concept)
     assert result.ok and result.data["count"] == count
+
+
+@pytest.mark.parametrize("query, expected", [("алюминиевые сплавы", "Сплавы на основе алюминия"),
+                                             ("титановые сплавы", "Сплавы на основе титана")])
+def test_adjective_query_finds_the_class(service, query, expected):
+    result = service.search_graph(query, "materials", 3)
+    assert expected in [hit["label"] for hit in result.data["hits"]]
