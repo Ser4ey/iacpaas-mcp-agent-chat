@@ -190,10 +190,27 @@ def create_server(settings: Settings | None = None) -> FastMCP:
         """
         return await asyncio.to_thread(service.count_graph, resource_id, root, concept)
 
-    @mcp.tool(annotations=READ_ONLY)
-    async def validate_resource(resource_id: str) -> ToolResult:
-        """Базовая проверка структуры индекса; не выполняет предметные вычисления и не меняет ресурс."""
-        return await asyncio.to_thread(service.validate_resource, resource_id)
+    if settings.write_enabled:
+        @mcp.tool(annotations=READ_ONLY)
+        async def validate_resource(resource_id: str | None = None,
+                                    ontology: Literal["materials_ontology", "properties_ontology",
+                                                      "characteristics_ontology"] | None = None,
+                                    items: list[Item] | None = None) -> ToolResult:
+            """Проверка без изменений. resource_id — базовая проверка структуры индекса ресурса.
+            ontology + items — проверить дерево будущего ресурса (как у create_resource) по онтологии:
+            valid, issues с подсказкой и description — что будет создано. Ничего не записывает и не требует
+            подтверждения; удобно перед create_resource, если дерево большое или сомнительное.
+            """
+            if items is not None or ontology:
+                return await writes.validate(ontology or "", [item.model_dump(exclude_none=True) for item in items or []])
+            if not resource_id:
+                return fail("INVALID_ARGUMENTS", "Укажите resource_id либо ontology и items.")
+            return await asyncio.to_thread(service.validate_resource, resource_id)
+    else:
+        @mcp.tool(name="validate_resource", annotations=READ_ONLY)
+        async def validate_resource_readonly(resource_id: str) -> ToolResult:
+            """Базовая проверка структуры индекса; не выполняет предметные вычисления и не меняет ресурс."""
+            return await asyncio.to_thread(service.validate_resource, resource_id)
 
     if not settings.write_enabled:
         return mcp

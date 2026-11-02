@@ -242,6 +242,23 @@ class WriteService:
             raise PlatformError(failure.code, f"{failure.message} {restored}", failure.retryable) from None
         return self._done("update_concept", target, result, concept_path=concept_path(labels[:-1] + [new_label]))
 
+    async def validate(self, ontology: str, items: list, name: str = "") -> ToolResult:
+        """Проверка дерева будущего ресурса по онтологии без записи и без обращения к платформе."""
+        if ontology not in ONTOLOGIES:
+            return fail("INVALID_ARGUMENTS", "ontology: " + ", ".join(ONTOLOGIES) + ".")
+        try:
+            schema = await asyncio.to_thread(Ontology.load, self.graph.store, self.graph.definitions, ontology)
+            graph = schema.build(name or "Проверка", "", items or [])
+        except OntologyError as error:
+            if error.code == "INDEX_NOT_READY":
+                return fail(error.code, error.message, True)
+            return ToolResult(ok=True, data={"valid": False, "ontology": ontology,
+                                             "issues": [{"code": error.code, "message": error.message}]},
+                              meta={"served_from": "local_index", "checked": "ontology_tree"})
+        return ToolResult(ok=True, data={"valid": True, "ontology": ontology, "issues": [],
+                                         "vertices": count_nodes(graph) - 1, "description": describe_graph(graph)},
+                          meta={"served_from": "local_index", "checked": "ontology_tree"})
+
     # ---------- Чтение по пути ----------
 
     async def _export(self, path: str, depth: int | None, root: str | None) -> dict:

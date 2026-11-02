@@ -94,3 +94,18 @@ async def test_accepted_write_reaches_platform_and_message_is_built_by_server(tm
     assert platform.writes == [("create_folder", "Демо агента", "Сценарий")]
     assert protected.structuredContent["error"]["code"] == "PROTECTED_RESOURCE"
     assert read.structuredContent["ok"] and read.structuredContent["meta"]["served_from"] == "iacpaas_live"
+
+
+@pytest.mark.asyncio
+async def test_validate_resource_checks_a_tree_only_when_writes_are_enabled(tmp_path):
+    mcp, platform = server(tmp_path)
+    async with create_connected_server_and_client_session(mcp) as client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+        result = await client.call_tool("validate_resource", {"ontology": "properties_ontology", "items": [
+            {"concept": "Класс свойств", "name": "Тепловые свойства"}]})
+    assert {"resource_id", "ontology", "items"} <= set(tools["validate_resource"].inputSchema["properties"])
+    assert result.structuredContent["data"]["valid"] is True and platform.writes == []
+    readonly, _ = server(tmp_path / "ro", write_enabled=False)
+    async with create_connected_server_and_client_session(readonly) as client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+    assert set(tools["validate_resource"].inputSchema["properties"]) == {"resource_id"}

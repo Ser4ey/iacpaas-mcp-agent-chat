@@ -273,3 +273,16 @@ async def test_ontology_description_has_structure_only_with_writes(tmp_path):
     assert "concept" in result.data["structure_legend"]
     readonly, _ = make(tmp_path / "ro", write_enabled=False)
     assert "structure" not in (await readonly.graph.get_inforesource("properties_ontology")).data
+
+
+@pytest.mark.asyncio
+async def test_validate_tree_without_writing(tmp_path):
+    writes, platform = make(tmp_path)
+    good = await writes.validate("properties_ontology", DEMO_ITEMS, "Мои свойства")
+    assert good.ok and good.data["valid"] is True and good.data["vertices"] == 4
+    assert good.data["description"].startswith("Класс свойств «Тепловые свойства» → Свойство «Теплопроводность»")
+    bad = await writes.validate("properties_ontology", [{"concept": "Класс свойств", "name": "К", "children": [
+        {"concept": "Плотность", "name": "П"}]}], "")
+    assert bad.ok and bad.data["valid"] is False
+    assert bad.data["issues"][0]["code"] == "CONCEPT_NOT_ALLOWED" and "Свойство" in bad.data["issues"][0]["message"]
+    assert platform.writes == [] and platform.exports == []
