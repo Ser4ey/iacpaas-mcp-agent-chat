@@ -167,21 +167,27 @@ class TurnPolicy(AgentMiddleware):
         key = (call["name"], json.dumps(entry["arguments"], ensure_ascii=False, sort_keys=True))
         # Повтор удачного чтения с теми же аргументами не выполняется: результат уже есть в истории хода.
         # Запись повтором не считается никогда, а после удачной записи чтение выполняется заново.
-        earlier = None if call["name"] in WRITE_TOOLS else self.done.get(key)
+        reading = call["name"] not in WRITE_TOOLS
+        earlier = self.done.get(key) if reading else None
         allowed = earlier is None and self.calls < self.max_calls
         if allowed:
             self.calls += 1
+            if reading:  # регистрация при старте: одинаковые параллельные вызовы шага выполняются один раз
+                self.done[key] = self.steps
         try:
             if earlier is not None:
+                where = "в этом же шаге" if earlier == self.steps else f"на шаге {earlier}"
                 output = {"ok": False, "error": {"code": "REPEATED_CALL", "message":
-                          f"Такой же вызов с теми же аргументами уже выполнен на шаге {earlier}; его результат "
-                          "выше в истории. Используйте его, а не повторяйте вызов."}}
+                          f"Такой же вызов с теми же аргументами уже выполнен {where}; его результат "
+                          "в истории. Используйте его, а не повторяйте вызов."}}
             elif allowed:
                 output = tool_output(await handler(request))
             else:
                 output = {"ok": False, "error": {"code": "tool_limit",
                                                  "message": "Достигнут лимит вызовов инструментов на один вопрос."}}
         except asyncio.CancelledError:
+            if reading and allowed:
+                self.done.pop(key, None)
             self.agent.settle_confirmation(entry, None)
             entry.update(result={"ok": False, "error": {"code": "cancelled", "message": "Вызов остановлен пользователем."}},
                          duration_ms=round((time.monotonic() - started) * 1000), is_error=True)
@@ -190,11 +196,10 @@ class TurnPolicy(AgentMiddleware):
             log.exception("Инструмент MCP %s завершился ошибкой", call["name"])
             output = {"ok": False, "error": {"code": "mcp_error", "message": "Не удалось выполнить инструмент MCP."}}
         self.agent.settle_confirmation(entry, output)
-        if allowed and output.get("ok"):
-            if call["name"] in WRITE_TOOLS:
-                self.done.clear()  # данные изменились: прежние чтения устарели
-            else:
-                self.done.setdefault(key, self.steps)
+        if allowed and reading and not output.get("ok"):
+            self.done.pop(key, None)  # неудачный вызов можно повторить (например, после таймаута платформы)
+        if allowed and not reading and output.get("ok"):
+            self.done.clear()  # данные изменились: прежние чтения устарели
         entry.update(result=output, duration_ms=round((time.monotonic() - started) * 1000),
                      is_error=not output.get("ok", False))
         write(("tool_end", dict(entry)))

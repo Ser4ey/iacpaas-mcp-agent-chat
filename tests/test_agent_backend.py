@@ -198,7 +198,10 @@ def test_tool_request_on_the_final_step_is_not_executed():
 
 
 def test_calls_over_the_limit_get_an_error_answer_each():
-    provider = Provider(tool_reply("search_graph", "search_graph", "search_graph"), text_reply("Ответ по двум."))
+    calls = [{"index": index, "id": f"call{index}", "type": "function", "function": {
+        "name": "search_graph", "arguments": json.dumps({"query": query}, ensure_ascii=False)}}
+        for index, query in enumerate(["сталь", "медь", "титан"])]
+    provider = Provider([event({"role": "assistant", "tool_calls": calls}, "tool_calls")], text_reply("Ответ по двум."))
     agent, tools, provider, _ = run_agent(provider=provider, max_tool_calls=2)
     assert len(tools.calls) == 2
     codes = [item["result"].get("error", {}).get("code") for item in agent.result.trace]
@@ -782,3 +785,11 @@ def test_failed_call_may_be_retried():
 
 async def _drain(agent):
     return [item async for item in agent.run("Вопрос", [])]
+
+
+def test_identical_parallel_calls_of_one_step_run_once():
+    provider = Provider(tool_reply("search_graph", "search_graph"), text_reply("Готово."))
+    agent, tools, provider, _ = run_agent(provider=provider)
+    assert len(tools.calls) == 1
+    codes = [item["result"].get("error", {}).get("code") for item in agent.result.trace]
+    assert codes == [None, "REPEATED_CALL"] and "в этом же шаге" in agent.result.trace[1]["result"]["error"]["message"]
