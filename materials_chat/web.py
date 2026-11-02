@@ -8,6 +8,7 @@ import asyncio
 import inspect
 import json
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -31,6 +32,59 @@ UNKNOWN_MODEL = {"name": None, "context_window": None, "price_input_per_million"
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=12000)
+
+
+class ConfirmationDecision(BaseModel):
+    accept: bool
+
+
+class Confirmations:
+    """Запросы подтверждения записи, ждущие решения пользователя: id → (диалог, решение)."""
+
+    def __init__(self):
+        self._pending: dict[str, tuple[str, asyncio.Future]] = {}
+
+    def open(self, session_id: str) -> tuple[str, asyncio.Future]:
+        confirmation_id = uuid.uuid4().hex
+        decision = asyncio.get_running_loop().create_future()
+        self._pending[confirmation_id] = (session_id, decision)
+        return confirmation_id, decision
+
+    def resolve(self, session_id: str, confirmation_id: str, accept: bool) -> bool:
+        """False — запроса нет, он из другого диалога или уже решён."""
+        item = self._pending.get(confirmation_id)
+        if item is None or item[0] != session_id or item[1].done():
+            return False
+        item[1].set_result(bool(accept))
+        return True
+
+    def close(self, confirmation_id: str):
+        self._pending.pop(confirmation_id, None)
+
+    def cancel_session(self, session_id: str):
+        """Остановленный ход или закрытая страница — отказ по всем ожидающим запросам диалога."""
+        for owner, decision in list(self._pending.values()):
+            if owner == session_id and not decision.done():
+                decision.set_result(False)
+
+    def bind(self, session_id: str) -> "SessionConfirmations":
+        return SessionConfirmations(self, session_id)
+
+
+class SessionConfirmations:
+    """Подтверждения одного диалога — то, что получает агент."""
+
+    def __init__(self, registry: Confirmations, session_id: str):
+        self.registry, self.session_id = registry, session_id
+
+    def open(self) -> tuple[str, asyncio.Future]:
+        return self.registry.open(self.session_id)
+
+    def resolve(self, confirmation_id: str, accept: bool) -> bool:
+        return self.registry.resolve(self.session_id, confirmation_id, accept)
+
+    def close(self, confirmation_id: str):
+        self.registry.close(confirmation_id)
 
 
 async def resolved(value):
@@ -66,6 +120,7 @@ def create_app(settings=None) -> FastAPI:
                          getattr(settings, "history_full_turns", 2), getattr(settings, "history_tool_chars", 1500))
     graph = GraphService(settings)
     locks: dict[str, asyncio.Lock] = {}
+    confirmations = Confirmations()
     refresh_task = None
     refresh_error = None
     refresh_result = None
@@ -125,6 +180,7 @@ def create_app(settings=None) -> FastAPI:
     app.state.settings, app.state.store, app.state.graph = settings, store, graph
     app.state.agent_factory = Agent
     app.state.verifier, app.state.locks = verify_answer, locks
+    app.state.confirmations = confirmations
     app.state.model_info = dict(UNKNOWN_MODEL)
     app.state.verifier_model_info = None
 
@@ -207,6 +263,8 @@ def create_app(settings=None) -> FastAPI:
             raise HTTPException(409, "В этом диалоге уже формируется ответ.")
         model_info = await current_model_info()
         runner = app.state.agent_factory(settings, model_info=model_info)
+        if getattr(settings, "write_enabled", False):
+            runner.confirmations = confirmations.bind(session_id)
 
         async def events():
             # Блокировка берётся внутри потока: если клиент отключится до его начала,
@@ -235,6 +293,7 @@ def create_app(settings=None) -> FastAPI:
                 except Exception as failure:
                     error = describe_error(failure)
                 finally:
+                    confirmations.cancel_session(session_id)
                     result = runner.result
                     problem = {"message": "Ответ остановлен пользователем.", "code": "cancelled"} if cancelled else error
                     content = result.content
@@ -268,6 +327,13 @@ def create_app(settings=None) -> FastAPI:
 
         return StreamingResponse(events(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.post("/api/sessions/{session_id}/confirmations/{confirmation_id}")
+    async def decide_confirmation(session_id: str, confirmation_id: str, body: ConfirmationDecision):
+        """Решение пользователя по записи. Работает, пока ход занят: агент ждёт именно его."""
+        if not confirmations.resolve(session_id, confirmation_id, body.accept):
+            raise HTTPException(404, "Запрос подтверждения не найден: время вышло, ход остановлен или решение уже принято.")
+        return {"ok": True, "status": "accepted" if body.accept else "declined"}
 
     @app.get("/api/sessions/{session_id}/context")
     async def session_context(session_id: str):

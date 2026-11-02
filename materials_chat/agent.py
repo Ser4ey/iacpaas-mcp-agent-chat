@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import time
@@ -22,6 +23,7 @@ from langchain.agents.middleware import AgentMiddleware, ModelResponse
 from langchain_core.messages import (AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage,
                                      convert_to_messages)
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from mcp import types
 
 from .openrouter import REASONING, ProviderError, as_provider_error, create_chat_model, reasoning_fragments
 from .prompts import FINAL_STEP_NOTE, SYSTEM_PROMPT
@@ -29,6 +31,7 @@ from .sessions import SessionStore
 from .usage import add_usage, empty_usage, request_usage
 
 log = logging.getLogger(__name__)
+WRITE_TOOLS = ("write_inforesource", "delete_inforesource")
 
 
 @dataclass
@@ -153,6 +156,12 @@ class TurnPolicy(AgentMiddleware):
         entry = {"id": call["id"], "name": call["name"], "arguments": call.get("args") or {}}
         self.agent.result.trace.append(entry)  # порядок журнала — порядок вызовов, а не их завершения
         write(("tool_start", dict(entry)))
+        # Запрос подтверждения приходит в задаче MCP-сессии, а писатель LangGraph читает
+        # конфигурацию из контекста узла — поэтому вызываем его в копии этого контекста.
+        context = contextvars.copy_context()
+        self.agent.writer = lambda event: context.run(write, event)
+        if call["name"] in WRITE_TOOLS:
+            self.agent.awaiting_confirmation.append(entry)
         started = time.monotonic()
         allowed = self.calls < self.max_calls
         if allowed:
@@ -164,12 +173,14 @@ class TurnPolicy(AgentMiddleware):
                 output = {"ok": False, "error": {"code": "tool_limit",
                                                  "message": "Достигнут лимит вызовов инструментов на один вопрос."}}
         except asyncio.CancelledError:
+            self.agent.settle_confirmation(entry, None)
             entry.update(result={"ok": False, "error": {"code": "cancelled", "message": "Вызов остановлен пользователем."}},
                          duration_ms=round((time.monotonic() - started) * 1000), is_error=True)
             raise
         except Exception:
             log.exception("Инструмент MCP %s завершился ошибкой", call["name"])
             output = {"ok": False, "error": {"code": "mcp_error", "message": "Не удалось выполнить инструмент MCP."}}
+        self.agent.settle_confirmation(entry, output)
         entry.update(result=output, duration_ms=round((time.monotonic() - started) * 1000),
                      is_error=not output.get("ok", False))
         write(("tool_end", dict(entry)))
@@ -178,19 +189,67 @@ class TurnPolicy(AgentMiddleware):
 
 
 class Agent:
-    def __init__(self, settings, tools_factory=None, model=None, model_info: dict | None = None):
+    def __init__(self, settings, tools_factory=None, model=None, model_info: dict | None = None,
+                 confirmations=None):
         self.settings = settings
+        # confirmations — подтверждения пользователя для записывающих инструментов (веб-интерфейс).
+        # Без них клиент MCP не заявляет elicitation, и сервер в записи отказывает.
+        self.confirmations = confirmations
         if tools_factory is None:
             from .mcp_client import mcp_tools
-            tools_factory = mcp_tools
+
+            def tools_factory(settings):
+                return mcp_tools(settings, elicitation=self.elicit if self.confirmations is not None else None)
         self.tools_factory = tools_factory
         self.model = model
         self.model_info = model_info
         self.result = TurnResult()
+        self.writer = None
+        self.awaiting_confirmation: list[dict] = []  # записывающие вызовы без карточки подтверждения
+
+    async def elicit(self, context, params: types.ElicitRequestParams):
+        """Запрос подтверждения от MCP-сервера → карточка в журнале хода → решение пользователя.
+
+        Ответ «принять» даёт только эндпоинт решения; у модели пути подтвердить нет.
+        """
+        entry = self.awaiting_confirmation.pop(0) if self.awaiting_confirmation else None
+        timeout = getattr(self.settings, "write_confirm_timeout_seconds", 120)
+        confirmation_id, decision = self.confirmations.open()
+        card = {"id": confirmation_id, "message": params.message, "status": "pending", "timeout_seconds": timeout,
+                "danger": bool(entry and entry["name"] == "delete_inforesource")}
+        if entry is not None:
+            entry["confirmation"] = card
+        if self.writer:
+            self.writer(("confirm_request", {**card, "call_id": entry and entry["id"], "tool": entry and entry["name"]}))
+        try:
+            # Сервер ждёт столько же и сам отменяет запись по таймауту; здесь — запас на доставку.
+            accepted = await asyncio.wait_for(decision, timeout + 5)
+        except asyncio.TimeoutError:
+            card["status"] = "expired"
+            return types.ElicitResult(action="cancel")
+        finally:
+            self.confirmations.close(confirmation_id)
+        if card["status"] == "pending":
+            card["status"] = "accepted" if accepted else "declined"
+        if accepted:
+            return types.ElicitResult(action="accept", content={"confirm": True})
+        return types.ElicitResult(action="decline")
+
+    def settle_confirmation(self, entry: dict, output: dict | None):
+        """Итог карточки к концу вызова: вышло время, ход остановлен; ожидание решения снимается."""
+        if entry in self.awaiting_confirmation:
+            self.awaiting_confirmation.remove(entry)
+        card = entry.get("confirmation")
+        if not card or card["status"] != "pending":
+            return
+        code = ((output or {}).get("error") or {}).get("code")
+        card["status"] = "expired" if code == "CONFIRMATION_TIMEOUT" else "cancelled"
+        self.confirmations.resolve(card["id"], False)
 
     async def run(self, text: str, history: list[dict]):
         """Асинхронный генератор событий (имя, данные) для потока в браузер."""
         self.result = result = TurnResult()
+        self.writer, self.awaiting_confirmation = None, []
         budget = context_budget(self.settings, self.model_info)
         self._check([{"role": "system", "content": SYSTEM_PROMPT}, *history, {"role": "user", "content": text}], budget)
         provider = getattr(self.settings, "provider_name", "API модели")

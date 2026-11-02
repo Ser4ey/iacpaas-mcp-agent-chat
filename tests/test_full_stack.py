@@ -51,8 +51,8 @@ def parse_events(text):
 
 
 @asynccontextmanager
-async def stack(tmp_path, answer):
-    """Веб-приложение + MCP-сервер + двойник модели. answer(body) -> (status, choice)."""
+async def stack(tmp_path, answer, platform=None):
+    """Веб-приложение + MCP-сервер + двойник модели. answer(body) -> (status, choice); platform — двойник IACPaaS."""
     config = tmp_path / "resources.json"
     config.write_text(json.dumps([{"id": "materials", "title": "Тестовая база", "path": "Тест", "kind": "information"}]), encoding="utf-8")
     mcp_port, web_port, provider_port = free_port(), free_port(), free_port()
@@ -86,7 +86,10 @@ async def stack(tmp_path, answer):
             yield "data: [DONE]\n\n"
         return StreamingResponse(chunks(), media_type="text/event-stream")
 
-    async with serve(create_server(settings).streamable_http_app(), mcp_port), serve(provider, provider_port), \
+    mcp = create_server(settings)
+    if platform is not None:
+        mcp.graph_service.client = platform
+    async with serve(mcp.streamable_http_app(), mcp_port), serve(provider, provider_port), \
             serve(create_app(settings), web_port):
         async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{web_port}", timeout=15) as client:
             yield client, requests
@@ -155,3 +158,81 @@ async def test_provider_error_inside_mcp_session_keeps_its_message(tmp_path):
         # Диалог не остаётся заблокированным после ошибки.
         status = await client.post(f"/api/sessions/{session['id']}/chat", json={"message": "Ещё раз"})
         assert status.status_code == 200
+
+
+def write_call():
+    arguments = {"request": {"operation": "create_folder", "parent_path": "", "name": "Демо агента"}}
+    return {"delta": {"tool_calls": [{"index": 0, "id": "call_write", "type": "function", "function": {
+        "name": "write_inforesource", "arguments": json.dumps(arguments, ensure_ascii=False)}}]}, "finish_reason": "tool_calls"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("accept", [True, False])
+async def test_write_waits_for_the_user_decision_from_the_stream(tmp_path, accept):
+    from test_writes import FakePlatform
+
+    def answer(body):
+        if not any(message["role"] == "tool" for message in body["messages"]):
+            return 200, write_call()
+        return 200, {"delta": {"content": "Готово."}, "finish_reason": "stop"}
+
+    platform = FakePlatform({})
+    async with stack(tmp_path, answer, platform) as (client, requests):
+        session = (await client.post("/api/sessions")).json()
+        events, buffer, decision_url = [], "", None
+        async with client.stream("POST", f"/api/sessions/{session['id']}/chat",
+                                 json={"message": "Создай папку «Демо агента»"}) as response:
+            async for chunk in response.aiter_text():
+                buffer += chunk.replace("\r\n", "\n")
+                while "\n\n" in buffer:
+                    block, buffer = buffer.split("\n\n", 1)
+                    events.extend(parse_events(block))
+                    if events[-1][0] == "confirm_request":
+                        assert platform.writes == []  # до решения пользователя ничего не записано
+                        decision_url = f"/api/sessions/{session['id']}/confirmations/{events[-1][1]['id']}"
+                        decision = await client.post(decision_url, json={"accept": accept})
+                        assert decision.json() == {"ok": True, "status": "accepted" if accept else "declined"}
+        request = next(payload for name, payload in events if name == "confirm_request")
+        assert {key: request[key] for key in ("call_id", "tool", "message", "danger", "timeout_seconds")} == {
+            "call_id": "call_write", "tool": "write_inforesource", "message": "Создать папку «Демо агента» в корне фонда.",
+            "danger": False, "timeout_seconds": 120}
+        end = next(payload for name, payload in events if name == "tool_end")
+        assert end["confirmation"]["status"] == ("accepted" if accept else "declined")
+        assert end["result"]["ok"] is accept
+        if not accept:
+            assert end["result"]["error"]["code"] == "CONFIRMATION_DECLINED"
+        assert platform.writes == ([("create_folder", "", "Демо агента")] if accept else [])
+        assert (await client.post(decision_url, json={"accept": True})).status_code == 404  # решение не повторить
+        saved = (await client.get(f"/api/sessions/{session['id']}")).json()
+        assert saved["messages"][-1]["trace"][0]["confirmation"]["status"] == end["confirmation"]["status"]
+        assert "write_inforesource" in {tool["function"]["name"] for tool in requests[0]["tools"]}
+
+
+@pytest.mark.asyncio
+async def test_closed_page_while_waiting_for_confirmation_writes_nothing(tmp_path):
+    from test_writes import FakePlatform
+
+    def answer(body):
+        if not any(message["role"] == "tool" for message in body["messages"]):
+            return 200, write_call()
+        return 200, {"delta": {"content": "Готово."}, "finish_reason": "stop"}
+
+    platform = FakePlatform({})
+    async with stack(tmp_path, answer, platform) as (client, _):
+        session = (await client.post("/api/sessions")).json()
+        confirmation = None
+        async with client.stream("POST", f"/api/sessions/{session['id']}/chat", json={"message": "Создай папку"}) as response:
+            async for chunk in response.aiter_text():
+                if "event: confirm_request" in chunk:
+                    confirmation = parse_events(chunk[chunk.index("event: confirm_request"):].split("\n\n")[0])[0][1]
+                    break  # страницу закрыли, не ответив
+        for _ in range(100):
+            saved = (await client.get(f"/api/sessions/{session['id']}")).json()
+            if saved["messages"]:
+                break
+            await asyncio.sleep(.05)
+        assert saved["messages"][-1]["error"]["code"] == "cancelled"
+        decision = await client.post(f"/api/sessions/{session['id']}/confirmations/{confirmation['id']}", json={"accept": True})
+        assert decision.status_code == 404
+        await asyncio.sleep(.3)
+        assert platform.writes == []
