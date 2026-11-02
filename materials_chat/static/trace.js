@@ -24,6 +24,17 @@ const TOOL_ACTIVITY = {
   count_graph: 'Считает вершины',
   validate_resource: 'Проверяет структуру ресурса',
   find_materials: 'Подбирает марки по составу',
+  write_inforesource: 'Готовит запись в IACPaaS',
+  delete_inforesource: 'Готовит удаление в IACPaaS',
+};
+
+// Итог карточки подтверждения записи (confirmation.status).
+const CONFIRMATION_STATUS = {
+  accepted: ['Подтверждено', 'is-accepted'],
+  declined: ['Отменено — запись не выполнена', 'is-declined'],
+  expired: ['Время вышло — запись не выполнена', 'is-declined'],
+  cancelled: ['Ход остановлен — запись не выполнена', 'is-declined'],
+  pending: ['Решение не принято — запись не выполнена', 'is-declined'],
 };
 
 const NODES = ['вершина', 'вершины', 'вершин'];
@@ -63,13 +74,29 @@ export class ToolLog {
     }
     row.call = { ...row.call, ...data, id };
     renderRow(row);
+    renderConfirmation(row);
+  }
+
+  /**
+   * Запрос подтверждения записи (событие confirm_request): карточка у вызова с кнопками и отсчётом.
+   * decide(id, accept) отправляет решение на сервер; пока оно не принято, запись не выполняется.
+   */
+  confirm(request, decide) {
+    const id = request.call_id ?? `confirm-${request.id}`;
+    if (!this.rows.has(id)) this.update({ id, name: request.tool ?? 'запись' });
+    const row = this.rows.get(id);
+    row.decide = decide;
+    row.deadline = Date.now() + (request.timeout_seconds ?? 120) * 1000;
+    this.update({ id, confirmation: { ...request, status: 'pending' } });
   }
 
   /** Поток оборвался — не оставляем «выполняющиеся» строки навсегда. */
   interruptPending() {
     for (const row of this.rows.values()) {
       if (isPending(row.call)) {
-        this.update({ ...row.call, is_error: true, result: { ok: false, error: { message: 'вызов прерван' } } });
+        const confirmation = row.call.confirmation?.status === 'pending'
+          ? { ...row.call.confirmation, status: 'cancelled' } : row.call.confirmation;
+        this.update({ ...row.call, confirmation, is_error: true, result: { ok: false, error: { message: 'вызов прерван' } } });
       }
     }
   }
@@ -118,6 +145,78 @@ function renderRow(row) {
   node.firstChild.replaceChildren(span('tool-name', call.name ?? 'инструмент'), args, facts);
   node.firstChild.title = 'Показать аргументы и результат';
   if (node.open) fillDetails(row);
+}
+
+/* ---------- Карточка подтверждения записи ---------- */
+
+function renderConfirmation(row) {
+  const confirmation = row.call.confirmation;
+  if (!confirmation) {
+    row.card?.remove();
+    return;
+  }
+  if (!row.card) {
+    row.card = document.createElement('div');
+    row.card.className = 'confirm-card';
+    row.card.setAttribute('role', 'group');
+    row.card.setAttribute('aria-label', 'Подтверждение записи в IACPaaS');
+    row.node.after(row.card);
+  }
+  const live = confirmation.status === 'pending' && row.decide && !row.deciding;
+  row.card.classList.toggle('is-danger', Boolean(confirmation.danger));
+  row.card.classList.toggle('is-open', live);
+  const title = span('confirm-title', confirmation.danger ? 'Подтвердите удаление' : 'Подтвердите запись в IACPaaS');
+  const message = span('confirm-message', confirmation.message ?? '');
+  const parts = [title, message];
+  clearInterval(row.timer);
+  if (live) {
+    const accept = button(confirmation.danger ? 'Удалить' : 'Подтвердить', 'confirm-accept');
+    const decline = button('Отменить', 'confirm-decline');
+    const countdown = span('confirm-countdown');
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((row.deadline - Date.now()) / 1000));
+      countdown.textContent = left ? `осталось ${left} с` : 'время вышло';
+      if (!left) {
+        clearInterval(row.timer);
+        accept.disabled = decline.disabled = true;
+      }
+    };
+    tick();
+    row.timer = setInterval(tick, 1000);
+    accept.addEventListener('click', () => sendDecision(row, true));
+    decline.addEventListener('click', () => sendDecision(row, false));
+    const actions = span('confirm-actions');
+    actions.append(accept, decline, countdown);
+    parts.push(actions);
+  } else if (row.deciding) {
+    parts.push(span('confirm-status', 'Отправляю решение…'));
+  } else {
+    const [text, kind] = CONFIRMATION_STATUS[confirmation.status] ?? CONFIRMATION_STATUS.pending;
+    parts.push(span(`confirm-status ${kind}`, text));
+  }
+  row.card.replaceChildren(...parts);
+}
+
+async function sendDecision(row, accept) {
+  row.deciding = true;
+  renderConfirmation(row);
+  let status;
+  try {
+    status = (await row.decide(row.call.confirmation.id, accept)).status;
+  } catch {
+    status = 'expired'; // запрос уже закрыт: время вышло или ход остановлен
+  }
+  row.deciding = false;
+  row.call.confirmation = { ...row.call.confirmation, status };
+  renderConfirmation(row);
+}
+
+function button(text, className) {
+  const node = document.createElement('button');
+  node.type = 'button';
+  node.className = className;
+  node.textContent = text;
+  return node;
 }
 
 /** Аргументы и результат строим только при раскрытии: JSON бывает большим. */
@@ -208,17 +307,26 @@ function describeArguments(name, args) {
     case 'search_graph':
       return [`«${args.query ?? ''}»`, resource && `в ${resource}`].filter(Boolean).join(' ');
     case 'get_subgraph':
-      return [[resource, args.root].filter(Boolean).join(' / '), args.depth != null && `глубина ${args.depth}`]
+      return [[resource || (args.path && `«${args.path}»`), args.root].filter(Boolean).join(' / '),
+        args.depth != null && `глубина ${args.depth}`]
         .filter(Boolean).join(', ');
     case 'count_graph':
       return [resource, args.root].filter(Boolean).join(' / ');
     case 'get_inforesource':
+      return resource || (args.path ? `«${args.path}»` : '');
     case 'validate_resource':
       return resource;
     case 'list_inforesources':
       return args.filter ? `«${args.filter}»` : 'все ресурсы';
     case 'find_materials':
       return describeComposition(args);
+    case 'write_inforesource': {
+      const request = args.request ?? {};
+      const target = request.path ?? [request.folder_path ?? request.parent_path, request.name].filter(Boolean).join(' / ');
+      return [request.operation, target && `«${target}»`].filter(Boolean).join(' ');
+    }
+    case 'delete_inforesource':
+      return [args.path && `«${args.path}»`, args.mode === 'delete' ? 'безвозвратно' : 'в корзину'].filter(Boolean).join(' ');
     default: {
       const text = JSON.stringify(args);
       return text === '{}' ? '' : text;
@@ -265,6 +373,9 @@ function describeResult(name, result) {
     case 'validate_resource':
       if (typeof data.valid !== 'boolean') return '';
       return data.valid ? 'структура в порядке' : plural(data.issues?.length ?? 0, ['замечание', 'замечания', 'замечаний']);
+    case 'write_inforesource':
+    case 'delete_inforesource':
+      return data.path ? `записано: «${data.path}»` : '';
     case 'find_materials':
       if (typeof data.total !== 'number') return '';
       return (data.total ? plural(data.total, ['марка', 'марки', 'марок']) : 'нет марок')

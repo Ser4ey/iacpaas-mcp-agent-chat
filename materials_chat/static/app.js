@@ -11,7 +11,7 @@
  *   format.js    — числа, склонения, рубли, даты.
  * Здесь — состояние, разделы, список диалогов, отправка вопроса и индикатор расхода.
  */
-import { api, streamChat, streamVerify } from './api.js';
+import { api, decideConfirmation, streamChat, streamVerify } from './api.js';
 import { renderContextView } from './context-view.js';
 import { renderDataView, renderIndexStatus } from './data-view.js';
 import { formatCompact, formatCost, formatNumber, formatShortDate, plural } from './format.js';
@@ -693,6 +693,12 @@ function handleStreamEvent(view, event, data) {
       view.tools.update(data);
       setTurnStatus(view, 'Разбирает найденное…');
       break;
+    case 'confirm_request': {
+      const sessionId = state.session.id;
+      view.tools.confirm(data, (id, accept) => decideConfirmation(sessionId, id, accept));
+      setTurnStatus(view, 'Ждёт вашего подтверждения…');
+      break;
+    }
     case 'answer_delta':
       setTurnStatus(view, '');
       view.content += data.text ?? '';

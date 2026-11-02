@@ -49,6 +49,12 @@ export async function streamChat(sessionId, message, signal, onEvent) {
   await readEvents(response.body, onEvent);
 }
 
+/** Решение пользователя по записи в IACPaaS: {"accept": true|false} → {ok, status}. */
+export function decideConfirmation(sessionId, confirmationId, accept) {
+  const path = `/api/sessions/${encodeURIComponent(sessionId)}/confirmations/${encodeURIComponent(confirmationId)}`;
+  return api(path, { method: 'POST', body: JSON.stringify({ accept }) });
+}
+
 /** Проверка ответа: поток claim (утверждение, как только готово), затем done с вердиктом или error. */
 export async function streamVerify(sessionId, messageId, onEvent) {
   const path = `/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/verify`;

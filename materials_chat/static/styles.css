@@ -1208,6 +1208,99 @@ button.claim-quote:hover {
 
 /* ========== Журнал инструментов ========== */
 
+/* Карточка подтверждения записи: под строкой вызова, видна без раскрытия. */
+.confirm-card {
+  display: grid;
+  gap: 6px;
+  margin: 0 14px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--bg);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.confirm-card.is-open {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.confirm-card.is-open.is-danger {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.confirm-title {
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.confirm-message {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.confirm-actions button {
+  padding: 5px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.confirm-actions .confirm-accept {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.confirm-actions .confirm-accept:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.is-danger .confirm-actions .confirm-accept {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: var(--surface);
+}
+
+.confirm-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.confirm-countdown {
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.confirm-status {
+  font-weight: 600;
+}
+
+.confirm-status.is-accepted {
+  color: var(--success);
+}
+
+.confirm-status.is-declined {
+  color: var(--text-3);
+}
+
 .tool-log {
   margin: 0 0 14px;
   padding-bottom: 4px;
@@ -1248,7 +1341,7 @@ button.claim-quote:hover {
 /* Строка: уголок · имя (колонка постоянной ширины) · аргументы · итог сразу за ними. */
 .tool > summary {
   display: grid;
-  grid-template-columns: 8px 16ch minmax(0, max-content) 1fr;
+  grid-template-columns: 8px 19ch minmax(0, max-content) 1fr;
   align-items: baseline;
   gap: 12px;
   margin: 0 -14px;
