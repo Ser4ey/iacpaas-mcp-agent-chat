@@ -58,8 +58,17 @@
 | `local_index` | Локальный поисковый индекс (снимок платформы) |
 | `local_index_fallback` | Платформа недоступна, взято из индекса; причина в `meta.live_error` |
 
-Для `iacpaas_live` в `meta` есть `fetched_at`, для индекса — `indexed_at`.
+Для `iacpaas_live` в `meta` есть `fetched_at`, для индекса — `indexed_at`; у записи — `written_at`.
 У ошибки: `ok: false`, `error: {"code": "NODE_NOT_FOUND", "message": "…", "retryable": false}`.
+
+У записывающего вызова (`write_inforesource`, `delete_inforesource`), для которого запрашивалось подтверждение, есть поле `confirmation`:
+
+```json
+"confirmation": {"id": "5f0c…", "message": "Создать папку «Демо агента» в корне фонда.",
+                 "status": "accepted", "timeout_seconds": 120, "danger": false}
+```
+
+`status`: `accepted` — подтверждено, `declined` — отменено, `expired` — время вышло, `cancelled` — ход остановлен или страница закрыта; `pending` бывает только пока карточка ждёт решения. `danger: true` — удаление. Успешная запись: `data = {"operation", "path", "platform": {"success", "code"}}`. Коды отказов записи перечислены в [api-mapping.md](api-mapping.md#запись-write_inforesource-и-delete_inforesource).
 
 ## Эндпоинты
 
@@ -193,6 +202,7 @@
 | `session` | `{"id", "title"}` | Сразу; title обновляется по первому вопросу |
 | `status` | `{"message"}` | Что агент делает сейчас |
 | `tool_start` | `{"id", "name", "arguments"}` | Начало вызова инструмента |
+| `confirm_request` | `{"id", "call_id", "tool", "message", "danger", "timeout_seconds", "status": "pending"}` | Записывающий вызов ждёт решения пользователя (между `tool_start` и `tool_end` этого вызова) |
 | `tool_end` | результат инструмента (см. выше) | Конец вызова |
 | `answer_delta` | `{"text"}` | Очередной кусок ответа (склеивать) |
 | `answer_meta` | `{"grounded", "tool_calls", "truncated"}` | После ответа; `truncated` — упёрлись в лимит длины |
@@ -207,6 +217,14 @@
 
 Ошибки до начала потока: `404` (нет диалога), `409` (ответ уже формируется), `503` (не настроен ключ или модель),
 `422` (пустое сообщение). Тело: `{"detail": "текст"}`.
+
+Остановка хода («Стоп») или закрытая страница отменяет все ожидающие подтверждения этого диалога: запись не выполняется.
+
+### `POST /api/sessions/{id}/confirmations/{confirmation_id}` — решение по записи
+
+Тело: `{"accept": true}` или `{"accept": false}`. Ответ: `{"ok": true, "status": "accepted" | "declined"}`. Работает, пока в диалоге идёт ответ: агент ждёт именно это решение. MCP-сервер выполняет запись только после `accept: true`; `accept: false` даёт модели `CONFIRMATION_DECLINED`.
+
+`404` — запроса нет, он из другого диалога, время вышло, ход остановлен или решение уже принято. Повторно решить нельзя.
 
 ### `POST /api/sessions/{id}/messages/{message_id}/verify` — проверить ответ
 
