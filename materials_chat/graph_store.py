@@ -283,6 +283,10 @@ class GraphStore:
         if root is None:
             item = self.resource(resource_id)
             return {"nodes": item["node_count"], "edges": item["edge_count"], "scope": "whole_indexed_resource"}
+        reachable, edges = self._reachable(resource_id, root)
+        return {"nodes": len(reachable), "edges": edges, "scope": "reachable_subgraph", "root": root}
+
+    def _reachable(self, resource_id: str, root: str) -> tuple[set[str], int]:
         if self.node(resource_id, root) is None:
             raise KeyError(root)
         # Все дуги ресурса читаются одним запросом, обход — в памяти. Это линейно по
@@ -298,7 +302,18 @@ class GraphStore:
                 if child not in reachable:
                     reachable.add(child)
                     queue.append(child)
-        return {"nodes": len(reachable), "edges": edges, "scope": "reachable_subgraph", "root": root}
+        return reachable, edges
+
+    def concept_names(self, resource_id: str, root: str | None = None) -> dict[str, list[str]]:
+        """Понятие онтологии (meta вершины) → имена вершин этого понятия в ресурсе или подграфе, по алфавиту."""
+        scope = None if root is None else self._reachable(resource_id, root)[0]
+        groups: dict[str, list[str]] = {}
+        with self.connect() as db:
+            for node_id, label, meta in db.execute("SELECT node_id, label, meta FROM nodes WHERE resource_id=?",
+                                                   (resource_id,)):
+                if meta and (scope is None or node_id in scope):
+                    groups.setdefault(meta, []).append(label or "")
+        return {meta: sorted(labels, key=normalized) for meta, labels in groups.items()}
 
 
 def page_of_subgraph(root: str, nodes: list[dict], edges: list[dict], total: int,

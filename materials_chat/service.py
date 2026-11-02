@@ -383,15 +383,27 @@ class GraphService:
         live = subgraph_from_export(definition.id, target, base_path, depth, max_nodes, offset)
         return live, self._live_meta(definition, indexed, graph)
 
-    def count_graph(self, resource_id: str, root: str | None = None) -> ToolResult:
+    def count_graph(self, resource_id: str, root: str | None = None, concept: str | None = None) -> ToolResult:
         definition, indexed, error = self._ready(resource_id)
         if error:
             return error
         try:
             counts = self.store.counts(resource_id, root)
+            groups = self.store.concept_names(resource_id, root) if concept and concept.strip() else None
         except KeyError:
             return fail("NODE_NOT_FOUND", "Вершина не найдена в выбранном ресурсе.")
-        return ToolResult(ok=True, data=counts, meta={**self._metadata(definition, indexed), "external_links_not_expanded": True})
+        meta = {**self._metadata(definition, indexed), "external_links_not_expanded": True}
+        if groups is None:
+            return ToolResult(ok=True, data=counts, meta=meta)
+        wanted = concept.strip().casefold().replace("ё", "е")
+        name = next((key for key in groups if key.casefold().replace("ё", "е") == wanted), None)
+        if name is None:
+            popular = sorted(groups, key=lambda key: -len(groups[key]))[:30]
+            return fail("UNKNOWN_CONCEPT", f"Понятия «{concept}» в {'подграфе' if root else 'ресурсе'} нет. Понятия: "
+                        + "; ".join(f"{key} ({len(groups[key])})" for key in popular) + ".")
+        names = groups[name]
+        return ToolResult(ok=True, data={**counts, "concept": name, "count": len(names), "names": names[:50],
+                                         "names_truncated": len(names) > 50}, meta=meta)
 
     def validate_resource(self, resource_id: str) -> ToolResult:
         definition, indexed, error = self._ready(resource_id)

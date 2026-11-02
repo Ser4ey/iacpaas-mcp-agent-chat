@@ -343,3 +343,30 @@ def test_validation_does_not_pretend_to_verify_domain_knowledge(service):
     assert result.ok and result.data["valid"]
     assert "domain_consistency" in result.data["not_checked"]
     assert "ontology_constraints" in result.data["not_checked"]
+
+
+def properties_graph():
+    def vertex(node_id, name, meta, *successors):
+        return {"id": node_id, "name": name, "meta": meta, "type": "НЕТЕРМИНАЛ", "successors": list(successors)}
+    return {**vertex(1, "База свойств", "Онтология базы свойств материалов",
+                     vertex(2, "Механические свойства", "Класс свойств",
+                            vertex(3, "Твердость", "Свойство", vertex(4, "Возможные значения", "Возможные значения")),
+                            vertex(5, "Предел прочности", "Свойство")),
+                     vertex(6, "Физические свойства", "Класс свойств", vertex(7, "Плотность", "Свойство"))),
+            "title": "База свойств", "type": "КОРЕНЬ", "json_type": "universal"}
+
+
+def test_count_by_concept_answers_how_many_in_one_call(service):
+    service.store.import_graph("other", properties_graph())
+    whole = service.count_graph("other", None, "Свойство")
+    assert whole.ok and whole.data["count"] == 3 and whole.data["nodes"] == 7
+    assert whole.data["names"] == ["Плотность", "Предел прочности", "Твердость"] and not whole.data["names_truncated"]
+    inside = service.count_graph("other", "2", "свойство")  # регистр не важен, охват — подграф класса
+    assert inside.data["count"] == 2 and inside.data["concept"] == "Свойство"
+
+
+def test_unknown_concept_lists_concepts_of_the_resource(service):
+    service.store.import_graph("other", properties_graph())
+    result = service.count_graph("other", None, "Сплав")
+    assert result.error.code == "UNKNOWN_CONCEPT"
+    assert "Свойство" in result.error.message and "Класс свойств" in result.error.message

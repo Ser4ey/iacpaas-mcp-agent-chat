@@ -181,9 +181,14 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             return await service.get_subgraph(resource_id, root, depth, max_nodes, offset)
 
     @mcp.tool(annotations=READ_ONLY)
-    async def count_graph(resource_id: str, root: str | None = None) -> ToolResult:
-        """Точное число уникальных вершин и дуг графа или подграфа (по индексу), без раскрытия внешних ссылок."""
-        return await asyncio.to_thread(service.count_graph, resource_id, root)
+    async def count_graph(resource_id: str, root: str | None = None, concept: str | None = None) -> ToolResult:
+        """Точное число уникальных вершин и дуг графа или подграфа (по индексу), без раскрытия внешних ссылок.
+        concept — имя понятия онтологии (meta вершин): «Свойство», «Класс свойств», «Химический элемент»,
+        «Материал», «Класс материалов», «Термин»… Тогда count — число вершин этого понятия, names — их имена
+        (до 50). Так «сколько свойств в базе» или «сколько химических элементов» отвечается одним вызовом;
+        вершины по одной не пересчитывайте. Неизвестное понятие — ошибка со списком понятий ресурса.
+        """
+        return await asyncio.to_thread(service.count_graph, resource_id, root, concept)
 
     @mcp.tool(annotations=READ_ONLY)
     async def validate_resource(resource_id: str) -> ToolResult:

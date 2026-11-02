@@ -213,3 +213,11 @@ def test_iron_above_five_percent_is_one_call_with_exact_total(service, ranges):
     result = service.find_materials([{"element": "Fe", "op": ">", "value": 5}], limit=1)
     expected = {key for key, value in ranges["Fe"].items() if value and value[0] > 5}
     assert result.data["total"] == len(expected) > 1000
+
+
+@pytest.mark.parametrize("resource_id, concept, count", [
+    ("properties", "Свойство", 28), ("elements", "Химический элемент", 39),
+    ("materials", "Класс материалов", 10), ("materials", "Материал", 1334), ("terms", "Термин", 31)])
+def test_how_many_by_concept_is_one_call(service, resource_id, concept, count):
+    result = service.count_graph(resource_id, None, concept)
+    assert result.ok and result.data["count"] == count
