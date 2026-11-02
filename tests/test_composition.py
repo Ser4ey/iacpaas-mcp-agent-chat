@@ -303,7 +303,7 @@ from materials_chat.prompts import SYSTEM_PROMPT
 async def test_mcp_lists_find_materials_with_its_rules(tmp_path):
     settings = make_service(tmp_path).settings
     tools = {tool.name: tool for tool in await create_server(settings).list_tools()}
-    assert len(tools) == 7
+    assert len(tools) == 9  # 7 читающих и 2 записывающих (WRITE_ENABLED по умолчанию true)
     assert {"conditions", "material_class", "sort_by", "order", "limit", "offset"} <= \
         set(tools["find_materials"].inputSchema["properties"])
     assert "include_unlisted" in json.dumps(tools["find_materials"].inputSchema, ensure_ascii=False)
