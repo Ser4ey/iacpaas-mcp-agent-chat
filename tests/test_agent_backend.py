@@ -176,7 +176,9 @@ def test_small_talk_is_answered_without_tools_and_not_replaced():
 
 
 def test_exhausted_steps_end_with_a_forced_final_answer():
-    provider = Provider(tool_reply("search_graph"), tool_reply("search_graph"), text_reply("Итог по найденному."))
+    # Запросы разные: одинаковый повтор не выполнялся бы (REPEATED_CALL).
+    provider = Provider(call_reply("a", "search_graph", {"query": "порошок"}),
+                        call_reply("b", "search_graph", {"query": "гранулы"}), text_reply("Итог по найденному."))
     agent, tools, provider, _ = run_agent(provider=provider, max_tool_steps=2)
     assert len(tools.calls) == 2
     assert [body["tool_choice"] for body in provider.requests] == ["auto", "auto", "none"]
@@ -708,3 +710,75 @@ def test_verify_rejects_wrong_targets_without_calling_the_model(tmp_path):
         app.state.locks[session_id] = lock
         assert client.post(f"/api/sessions/{session_id}/messages/{answer['id']}/verify").status_code == 409
     assert not provider.requests
+
+
+def call_reply(call_id, name, arguments):
+    call = {"index": 0, "id": call_id, "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)}}
+    return [event({"role": "assistant", "tool_calls": [call]}, "tool_calls")]
+
+
+class ReadWriteTools:
+    """search_graph и write_inforesource; запоминает фактические вызовы."""
+
+    def __init__(self):
+        self.calls = []
+
+    @asynccontextmanager
+    async def __call__(self, _settings):
+        async def search_graph(query: str = "") -> tuple:
+            self.calls.append(("search_graph", query))
+            result = {"ok": True, "data": {"hits": [], "total": 0}}
+            return json.dumps(result), {"structured_content": result}
+
+        async def write_inforesource(name: str = "") -> tuple:
+            self.calls.append(("write_inforesource", name))
+            result = {"ok": True, "data": {"operation": "create_folder", "path": name}}
+            return json.dumps(result), {"structured_content": result}
+        yield [StructuredTool.from_function(coroutine=search_graph, name="search_graph", description="Поиск",
+                                            response_format="content_and_artifact"),
+               StructuredTool.from_function(coroutine=write_inforesource, name="write_inforesource",
+                                            description="Запись", response_format="content_and_artifact")]
+
+
+def run_scripted(*replies):
+    tools, provider = ReadWriteTools(), Provider(*replies)
+    config = settings(max_tool_steps=6)
+    agent = Agent(config, tools, provider.model(config))
+
+    async def run():
+        return [item async for item in agent.run("Вопрос", [])]
+    return agent, tools, asyncio.run(run())
+
+
+def test_repeated_identical_call_is_not_executed_again():
+    agent, tools, _ = run_scripted(call_reply("a", "search_graph", {"query": "сталь"}),
+                                   call_reply("b", "search_graph", {"query": "сталь"}),
+                                   call_reply("c", "search_graph", {"query": "медь"}), text_reply("Готово."))
+    assert tools.calls == [("search_graph", "сталь"), ("search_graph", "медь")]
+    repeated = agent.result.trace[1]
+    assert repeated["result"]["error"]["code"] == "REPEATED_CALL" and "шаге 1" in repeated["result"]["error"]["message"]
+    assert agent.result.trace[2]["result"]["ok"] is True
+
+
+def test_writes_are_never_repeats_and_reads_after_a_write_run_again():
+    _, tools, _ = run_scripted(call_reply("a", "search_graph", {"query": "сталь"}),
+                               call_reply("b", "write_inforesource", {"name": "Папка"}),
+                               call_reply("c", "write_inforesource", {"name": "Папка"}),
+                               call_reply("d", "search_graph", {"query": "сталь"}), text_reply("Готово."))
+    assert tools.calls == [("search_graph", "сталь"), ("write_inforesource", "Папка"),
+                           ("write_inforesource", "Папка"), ("search_graph", "сталь")]
+
+
+def test_failed_call_may_be_retried():
+    tools, provider = Tools({"ok": False, "error": {"code": "PLATFORM_TIMEOUT", "message": "нет ответа"}}), Provider(
+        call_reply("a", "search_graph", {"query": "сталь"}), call_reply("b", "search_graph", {"query": "сталь"}),
+        text_reply("Платформа не ответила."))
+    config = settings()
+    agent = Agent(config, tools, provider.model(config))
+    asyncio.run(_drain(agent))
+    assert len(tools.calls) == 2
+
+
+async def _drain(agent):
+    return [item async for item in agent.run("Вопрос", [])]
