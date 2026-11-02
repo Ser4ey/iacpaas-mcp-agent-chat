@@ -164,8 +164,9 @@ def create_app(settings=None) -> FastAPI:
         model_task = asyncio.create_task(load_model_info())
         if getattr(settings, "auto_sync_on_start", True):
             current_index = await resolved(graph.status())
-            if not current_index.get("ready", False):
-                await refresh_index()
+            # Пустой индекс загружается целиком. Готовый сверяется с платформой по датам изменения
+            # ресурсов; обновляются только изменившиеся. И то и другое — в фоне, старт не ждёт.
+            start_refresh(changed_only=bool(current_index.get("ready", False)))
         yield
         for task in (refresh_task, model_task):
             if task and not task.done():
@@ -397,8 +398,8 @@ def create_app(settings=None) -> FastAPI:
         return StreamingResponse(events(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @app.post("/api/index/refresh", status_code=202)
-    async def refresh_index():
+    def start_refresh(changed_only: bool = False) -> dict:
+        """Фоновое обновление индекса: полное (все ресурсы) или только изменившихся ресурсов."""
         nonlocal refresh_task, refresh_error, refresh_result
         if refresh_task and not refresh_task.done():
             return {"ok": True, "status": "running"}
@@ -408,9 +409,11 @@ def create_app(settings=None) -> FastAPI:
         async def refresh():
             nonlocal refresh_error, refresh_result
             try:
-                refresh_result = await resolved(graph.refresh_all())
+                refresh_result = await resolved(graph.refresh_changed() if changed_only else graph.refresh_all())
                 if refresh_result.get("status") == "partial_failure":
-                    refresh_error = "Индекс обновлён частично. Список недоступных ресурсов показан в статусе индекса."
+                    refresh_error = ("Не все ресурсы удалось сверить с IACPaaS — работа идёт по сохранённому индексу. "
+                                     "Подробности — в статусе индекса." if changed_only else
+                                     "Индекс обновлён частично. Список недоступных ресурсов показан в статусе индекса.")
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -418,6 +421,11 @@ def create_app(settings=None) -> FastAPI:
                 refresh_error = "Не удалось обновить индекс. Проверьте учётные данные и подключение к IACPaaS."
         refresh_task = asyncio.create_task(refresh())
         return {"ok": True, "status": "started"}
+
+    @app.post("/api/index/refresh", status_code=202)
+    async def refresh_index():
+        """Кнопка «Обновить из IACPaaS» — полная загрузка всех ресурсов, независимо от дат."""
+        return start_refresh()
 
     static = Path(__file__).parent / "static"
     if static.is_dir():

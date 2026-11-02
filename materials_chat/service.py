@@ -72,6 +72,8 @@ class GraphService:
         self._refresh_lock = asyncio.Lock()
         self._sync_errors: dict[str, str] = {}
         self._current_resource: str | None = None
+        self._checking = False                    # идёт проверка дат, а не полная загрузка
+        self._last_check: dict | None = None      # итог последней проверки актуальности индекса
         # Короткий кэш живых выгрузок: модель часто листает один подграф по страницам.
         self._live_cache: dict[tuple, tuple[float, dict]] = {}
 
@@ -86,6 +88,7 @@ class GraphService:
                 "nodes": sum(item["node_count"] for item in existing),
                 "last_synced": min((item["indexed_at"] for item in existing), default=None),
                 "busy": self._refresh_lock.locked(), "current_resource": self._current_resource,
+                "checking": self._checking, "last_check": self._last_check,
                 "errors": dict(self._sync_errors)}
 
     async def refresh_all(self) -> dict:
@@ -112,6 +115,54 @@ class GraphService:
             finally:
                 self._current_resource = None
         return {"status": "complete" if not self._sync_errors else "partial_failure", "resources": results, **self.status()}
+
+    async def refresh_changed(self) -> dict:
+        """Обновить только изменившиеся ресурсы: дата изменения корня на платформе против даты в индексе.
+
+        Дату даёт лёгкая выгрузка корня (export-depth=0). Совпала — ресурс не выгружается; изменилась
+        (или ресурса нет в индексе) — выгружается целиком и переиндексируется. Ошибка платформы при проверке
+        индекс не трогает: работа продолжается по сохранённому снимку.
+        """
+        if self._refresh_lock.locked():
+            return {"status": "already_running"}
+        # failed — дату сверить не удалось; ошибки выгрузки изменившегося ресурса — в errors, как при полной загрузке.
+        unchanged, updated, failed, broken = [], [], {}, []
+        async with self._refresh_lock:
+            self._checking = True
+            try:
+                for item in self.definitions:
+                    self._current_resource = item.title
+                    indexed = self.store.resource(item.id)
+                    if indexed is not None:
+                        try:
+                            date = (await self.client.export(item.path, depth=0)).get("date")
+                        except PlatformError as error:
+                            failed[item.id] = error.message
+                            continue
+                        if date is None:
+                            failed[item.id] = "Платформа не сообщила дату изменения ресурса."
+                            continue
+                        if str(date) == str(indexed["metadata"].get("date")):
+                            unchanged.append(item.id)
+                            continue
+                    try:
+                        graph = await self.client.export(item.path)
+                        await asyncio.to_thread(self.store.import_graph, item.id, graph)
+                        self._sync_errors.pop(item.id, None)
+                        updated.append(item.id)
+                    except PlatformError as error:
+                        self._remember_sync_error(item.id, error.message)
+                        broken.append(item.id)
+                    except Exception:
+                        log.exception("Не удалось проиндексировать ресурс %s", item.id)
+                        self._remember_sync_error(item.id, "Не удалось разобрать или сохранить ресурс.")
+                        broken.append(item.id)
+            finally:
+                self._current_resource = None
+                self._checking = False
+                self._last_check = {"checked_at": utc_now(), "unchanged": unchanged, "updated": updated, "failed": failed}
+        return {"status": "complete" if not failed and not broken else "partial_failure", "mode": "changed",
+                **self._last_check, **self.status()}
 
     def _remember_sync_error(self, resource_id: str, message: str):
         self._sync_errors[resource_id] = message

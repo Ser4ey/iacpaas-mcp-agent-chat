@@ -73,7 +73,8 @@ export function renderIndexStatus(container, status, { requested, onRefresh }) {
   const busy = Boolean(requested || index.busy || index.refresh_running);
 
   const summary = el('p', 'index-summary');
-  const state = busy ? 'Индекс обновляется' : index.ready ? 'Индекс готов' : 'Индекс не загружен';
+  const state = index.checking ? 'Индекс сверяется с IACPaaS' : busy ? 'Индекс обновляется'
+    : index.ready ? 'Индекс готов' : 'Индекс не загружен';
   summary.append(el('strong', busy ? 'is-busy' : index.ready ? 'is-ready' : 'is-empty', state));
   const facts = [
     index.total_resources != null && `${index.resources_indexed ?? 0} из ${plural(index.total_resources, ['ресурса', 'ресурсов', 'ресурсов'])}`,
@@ -82,17 +83,37 @@ export function renderIndexStatus(container, status, { requested, onRefresh }) {
   ].filter(Boolean);
   for (const fact of facts) summary.append(el('span', '', fact));
 
+  const titleOf = (id) => status.resources?.find((resource) => resource.id === id)?.title ?? id;
   const lines = [summary];
-  if (busy && index.current_resource) lines.push(el('p', 'index-line', `Сейчас загружается: ${index.current_resource}`));
+  if (busy && index.current_resource) {
+    lines.push(el('p', 'index-line', `${index.checking ? 'Сейчас сверяется' : 'Сейчас загружается'}: ${index.current_resource}`));
+  }
+  if (!busy && index.last_check) lines.push(...checkLines(index.last_check, titleOf));
   for (const [id, message] of Object.entries(index.errors ?? {})) {
-    const title = status.resources?.find((resource) => resource.id === id)?.title ?? id;
-    lines.push(el('p', 'index-line is-error', `${title}: ${message}`));
+    lines.push(el('p', 'index-line is-error', `${titleOf(id)}: ${message}`));
   }
   if (index.refresh_error) lines.push(el('p', 'index-line is-error', index.refresh_error));
   text.replaceChildren(...lines);
 
   button.disabled = busy;
   button.textContent = busy ? 'Обновляется…' : 'Обновить из IACPaaS';
+  button.title = 'Загрузить все ресурсы заново, не сверяя даты изменения';
+}
+
+/** Итог сверки дат при старте: что обновлено, что не изменилось, что проверить не удалось. */
+function checkLines(check, titleOf) {
+  const when = formatDateTime(check.checked_at);
+  const updated = check.updated ?? [];
+  const lines = [el('p', 'index-line', updated.length
+    ? `Сверено с IACPaaS ${when}: обновлены изменившиеся — ${updated.map(titleOf).join(', ')}`
+    : `Сверено с IACPaaS ${when}: ${(check.unchanged ?? []).length ? 'изменений на платформе нет' : 'ничего не обновлено'}`)];
+  // Одна причина на строку: если платформа недоступна, это одна строка, а не восемь.
+  const reasons = new Map();
+  for (const [id, message] of Object.entries(check.failed ?? {})) reasons.set(message, [...(reasons.get(message) ?? []), titleOf(id)]);
+  for (const [message, titles] of reasons) {
+    lines.push(el('p', 'index-line is-error', `Не удалось сверить (${titles.join(', ')}): ${message}`));
+  }
+  return lines;
 }
 
 /* ---------- Части раздела ---------- */

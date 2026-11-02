@@ -1,6 +1,8 @@
-"""Проверки смысла графа и границ поиска без сети и реальных учётных данных."""
+"""Проверки смысла графа, границ поиска и обновления индекса без сети и реальных учётных данных."""
+import asyncio
 import copy
 import json
+import threading
 import time
 
 import pytest
@@ -370,3 +372,122 @@ def test_unknown_concept_lists_concepts_of_the_resource(service):
     result = service.count_graph("other", None, "Сплав")
     assert result.error.code == "UNKNOWN_CONCEPT"
     assert "Свойство" in result.error.message and "Класс свойств" in result.error.message
+
+
+# ---------- Проверка устаревания индекса: дата изменения корня (export-depth=0) против даты в индексе ----------
+
+class DatedPlatform:
+    """Подменённая IACPaaS: корень ресурса с датой изменения (depth=0) и полная выгрузка; запоминает вызовы."""
+
+    def __init__(self, dates, errors=None, gate=None):
+        self.dates, self.errors, self.gate, self.calls = dates, errors or {}, gate, []
+
+    async def export(self, resource_path, depth=None, root_path=None):
+        self.calls.append((resource_path, depth))
+        if self.gate is not None:
+            await asyncio.to_thread(self.gate.wait, 10)
+        if resource_path in self.errors:
+            raise self.errors[resource_path]
+        graph = graph_with_shared_cycle()
+        graph["date"] = self.dates[resource_path]
+        if depth == 0:
+            graph.pop("successors")
+        else:
+            graph["successors"].append({"id": 9, "name": "Новыйсплав", "type": "НЕТЕРМИНАЛ"})
+        return graph
+
+
+def indexed_service(tmp_path):
+    """Оба ресурса в индексе с датой изменения 01.01.2026."""
+    result = make_service(tmp_path)
+    result.store.import_graph("other", graph_with_shared_cycle())
+    return result
+
+
+async def test_unchanged_resources_are_not_downloaded_again(tmp_path):
+    service = indexed_service(tmp_path)
+    before = {item: service.store.resource(item)["indexed_at"] for item in ("materials", "other")}
+    service.client = DatedPlatform({"Тест / Материалы": "01.01.2026", "Тест / Другая база": "01.01.2026"})
+    result = await service.refresh_changed()
+    assert result["status"] == "complete" and result["mode"] == "changed"
+    assert result["unchanged"] == ["materials", "other"] and result["updated"] == [] and result["failed"] == {}
+    # Только лёгкие запросы корня, полной выгрузки нет.
+    assert service.client.calls == [("Тест / Материалы", 0), ("Тест / Другая база", 0)]
+    assert {item: service.store.resource(item)["indexed_at"] for item in ("materials", "other")} == before
+    assert service.status()["last_check"]["unchanged"] == ["materials", "other"]
+    assert service.status()["checking"] is False and service.status()["busy"] is False
+
+
+async def test_only_the_changed_resource_is_reindexed(tmp_path):
+    service = indexed_service(tmp_path)
+    other_before = service.store.resource("other")["indexed_at"]
+    service.client = DatedPlatform({"Тест / Материалы": "02.11.2026-13:35:10.766", "Тест / Другая база": "01.01.2026"})
+    result = await service.refresh_changed()
+    assert result["status"] == "complete"
+    assert result["updated"] == ["materials"] and result["unchanged"] == ["other"]
+    assert service.client.calls == [("Тест / Материалы", 0), ("Тест / Материалы", None), ("Тест / Другая база", 0)]
+    assert service.store.resource("materials")["metadata"]["date"] == "02.11.2026-13:35:10.766"
+    assert service.search_graph("Новыйсплав", "materials").data["total"] == 1
+    assert service.search_graph("Новыйсплав", "other").data["total"] == 0
+    assert service.store.resource("other")["indexed_at"] == other_before
+
+
+async def test_platform_error_during_the_check_keeps_the_index(tmp_path):
+    service = indexed_service(tmp_path)
+    service.client = DatedPlatform({"Тест / Другая база": "01.01.2026"}, errors={
+        "Тест / Материалы": PlatformError("PLATFORM_TIMEOUT", "IACPaaS не ответила вовремя.", True)})
+    result = await service.refresh_changed()
+    assert result["status"] == "partial_failure"
+    assert result["failed"] == {"materials": "IACPaaS не ответила вовремя."} and result["unchanged"] == ["other"]
+    # Индекс не тронут и работает; сбой проверки — не сбой синхронизации ресурса.
+    assert service.status()["ready"] and service.status()["errors"] == {}
+    assert service.store.resource("materials")["last_error"] is None
+    assert service.search_graph("Алюминий", "materials").ok
+
+
+async def test_missing_resource_is_loaded_and_failed_download_is_a_sync_error(tmp_path):
+    service = make_service(tmp_path)  # «other» в индексе нет
+    service.client = DatedPlatform({"Тест / Материалы": "05.05.2026", "Тест / Другая база": "01.01.2026"})
+    result = await service.refresh_changed()
+    assert result["updated"] == ["materials", "other"]
+    assert ("Тест / Другая база", 0) not in service.client.calls  # сверять не с чем — выгружается сразу
+    service.client = DatedPlatform({"Тест / Материалы": "06.06.2026", "Тест / Другая база": "01.01.2026"})
+    original = service.client.export
+
+    async def full_export_fails(resource_path, depth=None, root_path=None):
+        if depth is None:
+            raise PlatformError("PLATFORM_UNAVAILABLE", "Тестовая ошибка сети", True)
+        return await original(resource_path, depth, root_path)
+    service.client.export = full_export_fails
+    result = await service.refresh_changed()
+    assert result["status"] == "partial_failure" and result["updated"] == []
+    assert service.status()["errors"] == {"materials": "Тестовая ошибка сети"}
+    assert service.store.resource("materials")["metadata"]["date"] == "05.05.2026"  # прежний снимок остаётся
+
+
+def test_web_start_checks_dates_in_background_without_delaying_start(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from materials_chat.web import create_app
+
+    service = indexed_service(tmp_path)
+    settings = service.settings.model_copy(update={
+        "auto_sync_on_start": True, "history_path": tmp_path / "history.sqlite3",
+        "openrouter_model": "fake", "openrouter_base_url": "http://127.0.0.1:9"})
+    app = create_app(settings)
+    gate = threading.Event()
+    app.state.graph.client = DatedPlatform({"Тест / Материалы": "01.01.2026", "Тест / Другая база": "01.01.2026"},
+                                           gate=gate)
+    with TestClient(app) as client:
+        # Старт не ждёт платформу: индекс готов и работает, пока идёт сверка.
+        index = client.get("/api/status").json()["index"]
+        assert index["ready"] and index["refresh_running"] and index["checking"]
+        gate.set()
+        for _ in range(200):
+            index = client.get("/api/status").json()["index"]
+            if not index["refresh_running"]:
+                break
+            time.sleep(.02)
+        assert index["refresh_error"] is None and index["refresh_result"]["mode"] == "changed"
+        assert index["last_check"]["unchanged"] == ["materials", "other"]
+        assert app.state.graph.client.calls == [("Тест / Материалы", 0), ("Тест / Другая база", 0)]
