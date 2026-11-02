@@ -303,7 +303,7 @@ from materials_chat.prompts import SYSTEM_PROMPT
 async def test_mcp_lists_find_materials_with_its_rules(tmp_path):
     settings = make_service(tmp_path).settings
     tools = {tool.name: tool for tool in await create_server(settings).list_tools()}
-    assert len(tools) == 7
+    assert len(tools) == 9  # 7 читающих и 2 записывающих (WRITE_ENABLED по умолчанию true)
     assert {"conditions", "material_class", "sort_by", "order", "limit", "offset"} <= \
         set(tools["find_materials"].inputSchema["properties"])
     assert "include_unlisted" in json.dumps(tools["find_materials"].inputSchema, ensure_ascii=False)
@@ -322,3 +322,45 @@ async def test_mcp_find_materials_returns_the_envelope(tmp_path):
 def test_prompt_routes_composition_questions_to_find_materials():
     assert "find_materials" in SYSTEM_PROMPT and "has_more: false" in SYSTEM_PROMPT
     assert "заполнено у N записей" in SYSTEM_PROMPT
+
+
+def steel_with_balance_base():
+    """Как у 1 016 сталей справочника: основа Fe записана «не более X», остальные элементы с верхними границами."""
+    graph = catalog()
+    graph["successors"][0]["successors"].append(material(
+        600, "08кп", "Fe", element("Fe", at_most(98.81)), element("C", interval(0.05, 0.11)),
+        element("Mn", interval(0.25, 0.5)), element("Si", at_most(0.03))))
+    graph["successors"][0]["successors"].append(material(
+        700, "Сталь с расчётным Ti", "Fe", element("Fe", at_most(99.0)), element("Ti", node("Расчетное", "Расчетное"))))
+    graph["successors"][0]["successors"].append(material(800, "Ст0", "Fe", element("Fe", at_most(100.0))))
+    return graph
+
+
+def test_balance_base_gets_lower_bound_from_the_remainder(tmp_path):
+    store = GraphStore(tmp_path / "graph.sqlite3")
+    store.import_graph("materials", steel_with_balance_base())
+    records = by_name(store.composition("materials"))
+    iron = records["08кп"]["contents"]["Fe"]
+    # Остаток до 100 %: 100 − (0.11 + 0.5 + 0.03) = 99.36, но не больше записанного верхнего предела 98.81.
+    assert (iron["form"], iron["low"], iron["high"]) == ("Основа (остаток)", 98.81, 98.81)
+    assert "остаток" in iron["text"]
+    # Неизвестный диапазон другого элемента не даёт посчитать остаток: остаётся «не более».
+    assert records["Сталь с расчётным Ti"]["contents"]["Fe"]["form"] == "Не более"
+    assert records["Ст0"]["contents"]["Fe"]["form"] == "Не более"  # в записи только основа
+    # Примесь Fe в алюминиевом сплаве — не основа: правило её не трогает.
+    assert records["АМг3"]["contents"]["Fe"] == {**records["АМг3"]["contents"]["Fe"], "form": "Не более", "low": 0.0}
+
+
+def test_iron_above_five_percent_counts_balance_steels(tmp_path):
+    service = make_service(tmp_path)
+    service.store.import_graph("materials", steel_with_balance_base())
+    result = find(service, {"element": "Fe", "op": ">", "value": 5})
+    assert "08кп" in names(result) and "Сталь с расчётным Ti" not in names(result)
+
+
+def test_table_built_by_older_rules_is_rebuilt(store):
+    with store.connect() as db:  # индекс, где таблица состава собрана прежней версией правил
+        state = db.execute("SELECT indexed_at FROM composition_state").fetchone()[0]
+        db.execute("UPDATE composition_state SET indexed_at=?", (state.split("#")[0],))
+        db.execute("DELETE FROM composition_materials")
+    assert len(store.composition("materials")) == 6

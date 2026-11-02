@@ -6,7 +6,7 @@ from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 
-from .composition import rebuild_composition
+from .composition import rebuild_composition, state_key
 from .platform import utc_now
 
 
@@ -29,6 +29,20 @@ def search_terms(text: str) -> list[str]:
                     break
         result.append(word)
     return result
+
+
+def query_stem(term: str) -> str:
+    """Основа прилагательного в запросе — к основе существительного: «алюминиев» → «алюмин», «железн» → «желез».
+
+    Только для запроса: поиск по префиксу, поэтому более короткая основа находит и «алюминия», и «алюминий».
+    Индекс при этом не меняется.
+    """
+    if re.fullmatch(r"[а-я]+", term):
+        if len(term) >= 7 and term.endswith(("иев", "ев", "ов")):
+            return re.sub(r"(иев|ев|ов)$", "", term)
+        if len(term) >= 6 and term.endswith("н") and term[-2] not in "аеиоуыэюя":
+            return term[:-1]
+    return term
 
 
 def node_from_raw(resource_id: str, raw: dict, path: str) -> dict:
@@ -146,7 +160,7 @@ class GraphStore:
                 raise KeyError(resource_id)
             state = db.execute("SELECT indexed_at FROM composition_state WHERE resource_id=?",
                                (resource_id,)).fetchone()
-            if state is None or state["indexed_at"] != resource["indexed_at"]:
+            if state is None or state["indexed_at"] != state_key(resource["indexed_at"]):
                 rebuild_composition(db, resource_id, resource["indexed_at"])
             records = {}
             for row in db.execute("SELECT material_id, name, classes, base FROM composition_materials "
@@ -180,7 +194,7 @@ class GraphStore:
             db.execute("UPDATE resources SET last_error=? WHERE resource_id=?", (message, resource_id))
 
     def search(self, query: str, resource_ids: list[str], limit: int, offset: int) -> dict:
-        terms = list(dict.fromkeys(search_terms(query)))[:8]
+        terms = list(dict.fromkeys(query_stem(term) for term in search_terms(query)))[:8]
         if not terms:
             return {"hits": [], "total": 0, "match_mode": "empty_query"}
         slots = ",".join("?" for _ in resource_ids)
@@ -283,6 +297,10 @@ class GraphStore:
         if root is None:
             item = self.resource(resource_id)
             return {"nodes": item["node_count"], "edges": item["edge_count"], "scope": "whole_indexed_resource"}
+        reachable, edges = self._reachable(resource_id, root)
+        return {"nodes": len(reachable), "edges": edges, "scope": "reachable_subgraph", "root": root}
+
+    def _reachable(self, resource_id: str, root: str) -> tuple[set[str], int]:
         if self.node(resource_id, root) is None:
             raise KeyError(root)
         # Все дуги ресурса читаются одним запросом, обход — в памяти. Это линейно по
@@ -298,7 +316,18 @@ class GraphStore:
                 if child not in reachable:
                     reachable.add(child)
                     queue.append(child)
-        return {"nodes": len(reachable), "edges": edges, "scope": "reachable_subgraph", "root": root}
+        return reachable, edges
+
+    def concept_names(self, resource_id: str, root: str | None = None) -> dict[str, list[str]]:
+        """Понятие онтологии (meta вершины) → имена вершин этого понятия в ресурсе или подграфе, по алфавиту."""
+        scope = None if root is None else self._reachable(resource_id, root)[0]
+        groups: dict[str, list[str]] = {}
+        with self.connect() as db:
+            for node_id, label, meta in db.execute("SELECT node_id, label, meta FROM nodes WHERE resource_id=?",
+                                                   (resource_id,)):
+                if meta and (scope is None or node_id in scope):
+                    groups.setdefault(meta, []).append(label or "")
+        return {meta: sorted(labels, key=normalized) for meta, labels in groups.items()}
 
 
 def page_of_subgraph(root: str, nodes: list[dict], edges: list[dict], total: int,

@@ -8,6 +8,7 @@ import asyncio
 import inspect
 import json
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -16,9 +17,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .agent import Agent, context_budget
+from .agent import Agent, context_budget, context_window
 from .answer_check import check_numbers
-from .openrouter import ProviderError, fetch_model_info
+from .openrouter import ProviderError, fetch_model_info, missing_model_settings
 from .sessions import SessionStore
 from .verifier import successful_data, verifier_model_name, verify_answer
 
@@ -26,11 +27,64 @@ log = logging.getLogger(__name__)
 
 UNKNOWN_MODEL = {"name": None, "context_window": None, "price_input_per_million": None,
                  "price_output_per_million": None, "price_cache_read_per_million": None,
-                 "currency": None, "source": "unknown"}
+                 "currency": None, "source": "unknown", "context_source": None, "free": False}
 
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=12000)
+
+
+class ConfirmationDecision(BaseModel):
+    accept: bool
+
+
+class Confirmations:
+    """Запросы подтверждения записи, ждущие решения пользователя: id → (диалог, решение)."""
+
+    def __init__(self):
+        self._pending: dict[str, tuple[str, asyncio.Future]] = {}
+
+    def open(self, session_id: str) -> tuple[str, asyncio.Future]:
+        confirmation_id = uuid.uuid4().hex
+        decision = asyncio.get_running_loop().create_future()
+        self._pending[confirmation_id] = (session_id, decision)
+        return confirmation_id, decision
+
+    def resolve(self, session_id: str, confirmation_id: str, accept: bool) -> bool:
+        """False — запроса нет, он из другого диалога или уже решён."""
+        item = self._pending.get(confirmation_id)
+        if item is None or item[0] != session_id or item[1].done():
+            return False
+        item[1].set_result(bool(accept))
+        return True
+
+    def close(self, confirmation_id: str):
+        self._pending.pop(confirmation_id, None)
+
+    def cancel_session(self, session_id: str):
+        """Остановленный ход или закрытая страница — отказ по всем ожидающим запросам диалога."""
+        for owner, decision in list(self._pending.values()):
+            if owner == session_id and not decision.done():
+                decision.set_result(False)
+
+    def bind(self, session_id: str) -> "SessionConfirmations":
+        return SessionConfirmations(self, session_id)
+
+
+class SessionConfirmations:
+    """Подтверждения одного диалога — то, что получает агент."""
+
+    def __init__(self, registry: Confirmations, session_id: str):
+        self.registry, self.session_id = registry, session_id
+
+    def open(self) -> tuple[str, asyncio.Future]:
+        return self.registry.open(self.session_id)
+
+    def resolve(self, confirmation_id: str, accept: bool) -> bool:
+        return self.registry.resolve(self.session_id, confirmation_id, accept)
+
+    def close(self, confirmation_id: str):
+        self.registry.close(confirmation_id)
 
 
 async def resolved(value):
@@ -66,6 +120,7 @@ def create_app(settings=None) -> FastAPI:
                          getattr(settings, "history_full_turns", 2), getattr(settings, "history_tool_chars", 1500))
     graph = GraphService(settings)
     locks: dict[str, asyncio.Lock] = {}
+    confirmations = Confirmations()
     refresh_task = None
     refresh_error = None
     refresh_result = None
@@ -98,7 +153,8 @@ def create_app(settings=None) -> FastAPI:
                 "openrouter_model": name, "price_input_per_million": None, "price_output_per_million": None}))
             if info.get("context_window") is None:
                 # Модели нет в каталоге: окно — как у агента, цены неизвестны (стоимость — только из usage.cost).
-                info = {**info, "context_window": agent_info.get("context_window")}
+                info = {**info, "context_window": agent_info.get("context_window"),
+                        "context_source": agent_info.get("context_source")}
             app.state.verifier_model_info = info
         return app.state.verifier_model_info
 
@@ -108,8 +164,9 @@ def create_app(settings=None) -> FastAPI:
         model_task = asyncio.create_task(load_model_info())
         if getattr(settings, "auto_sync_on_start", True):
             current_index = await resolved(graph.status())
-            if not current_index.get("ready", False):
-                await refresh_index()
+            # Пустой индекс загружается целиком. Готовый сверяется с платформой по датам изменения
+            # ресурсов; обновляются только изменившиеся. И то и другое — в фоне, старт не ждёт.
+            start_refresh(changed_only=bool(current_index.get("ready", False)))
         yield
         for task in (refresh_task, model_task):
             if task and not task.done():
@@ -125,6 +182,7 @@ def create_app(settings=None) -> FastAPI:
     app.state.settings, app.state.store, app.state.graph = settings, store, graph
     app.state.agent_factory = Agent
     app.state.verifier, app.state.locks = verify_answer, locks
+    app.state.confirmations = confirmations
     app.state.model_info = dict(UNKNOWN_MODEL)
     app.state.verifier_model_info = None
 
@@ -139,9 +197,7 @@ def create_app(settings=None) -> FastAPI:
 
     @app.get("/api/status")
     async def status():
-        key_name, model_name = getattr(settings, "model_setting_names", ("OPENROUTER_API_KEY", "OPENROUTER_MODEL"))
-        missing = [name for name, value in ((key_name, getattr(settings, "openrouter_api_key", "")),
-                                            (model_name, getattr(settings, "openrouter_model", ""))) if not value]
+        missing = missing_model_settings(settings)
         index = await resolved(graph.status())
         if not isinstance(index, dict):
             index = {"status": str(index)}
@@ -152,7 +208,7 @@ def create_app(settings=None) -> FastAPI:
                 "model_info": app.state.model_info,
                 "missing_settings": missing, "mcp_transport": getattr(settings, "mcp_transport", "http"),
                 "resources": await resolved(graph.resources()), "index": index,
-                "limits": {"context_budget": budget(),
+                "limits": {"context_budget": budget(), "context_window": context_window(settings, app.state.model_info),
                            "max_output_tokens": getattr(settings, "max_output_tokens", 4096),
                            "max_tool_steps": getattr(settings, "max_tool_steps", 8),
                            "max_tool_calls": getattr(settings, "max_tool_calls", 16)}}
@@ -199,14 +255,15 @@ def create_app(settings=None) -> FastAPI:
         text = body.message.strip()
         if not text:
             raise HTTPException(422, "Сообщение не может быть пустым.")
-        if not getattr(settings, "openrouter_api_key", "") or not getattr(settings, "openrouter_model", ""):
-            names = getattr(settings, "model_setting_names", ("OPENROUTER_API_KEY", "OPENROUTER_MODEL"))
-            raise HTTPException(503, f"Заполните {' и '.join(names)} в .env и перезапустите приложение.")
+        if missing := missing_model_settings(settings):
+            raise HTTPException(503, f"Заполните {' и '.join(missing)} в .env и перезапустите приложение.")
         lock = locks.setdefault(session_id, asyncio.Lock())
         if lock.locked():
             raise HTTPException(409, "В этом диалоге уже формируется ответ.")
         model_info = await current_model_info()
         runner = app.state.agent_factory(settings, model_info=model_info)
+        if getattr(settings, "write_enabled", False):
+            runner.confirmations = confirmations.bind(session_id)
 
         async def events():
             # Блокировка берётся внутри потока: если клиент отключится до его начала,
@@ -235,6 +292,7 @@ def create_app(settings=None) -> FastAPI:
                 except Exception as failure:
                     error = describe_error(failure)
                 finally:
+                    confirmations.cancel_session(session_id)
                     result = runner.result
                     problem = {"message": "Ответ остановлен пользователем.", "code": "cancelled"} if cancelled else error
                     content = result.content
@@ -269,6 +327,13 @@ def create_app(settings=None) -> FastAPI:
         return StreamingResponse(events(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    @app.post("/api/sessions/{session_id}/confirmations/{confirmation_id}")
+    async def decide_confirmation(session_id: str, confirmation_id: str, body: ConfirmationDecision):
+        """Решение пользователя по записи. Работает, пока ход занят: агент ждёт именно его."""
+        if not confirmations.resolve(session_id, confirmation_id, body.accept):
+            raise HTTPException(404, "Запрос подтверждения не найден: время вышло, ход остановлен или решение уже принято.")
+        return {"ok": True, "status": "accepted" if body.accept else "declined"}
+
     @app.get("/api/sessions/{session_id}/context")
     async def session_context(session_id: str):
         """Что уйдёт в модель со следующим вопросом: системный промпт и история по ходам (старые — сжатые)."""
@@ -286,9 +351,8 @@ def create_app(settings=None) -> FastAPI:
         turn = store.turn(session_id, message_id)
         if turn is None:
             raise HTTPException(404, "Ответ не найден.")
-        if not getattr(settings, "openrouter_api_key", "") or not getattr(settings, "openrouter_model", ""):
-            names = getattr(settings, "model_setting_names", ("OPENROUTER_API_KEY", "OPENROUTER_MODEL"))
-            raise HTTPException(503, f"Заполните {' и '.join(names)} в .env и перезапустите приложение.")
+        if missing := missing_model_settings(settings):
+            raise HTTPException(503, f"Заполните {' и '.join(missing)} в .env и перезапустите приложение.")
         lock = locks.get(session_id)
         if lock and lock.locked():
             raise HTTPException(409, "В этом диалоге сейчас формируется ответ. Проверьте после его завершения.")
@@ -334,8 +398,8 @@ def create_app(settings=None) -> FastAPI:
         return StreamingResponse(events(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @app.post("/api/index/refresh", status_code=202)
-    async def refresh_index():
+    def start_refresh(changed_only: bool = False) -> dict:
+        """Фоновое обновление индекса: полное (все ресурсы) или только изменившихся ресурсов."""
         nonlocal refresh_task, refresh_error, refresh_result
         if refresh_task and not refresh_task.done():
             return {"ok": True, "status": "running"}
@@ -345,9 +409,11 @@ def create_app(settings=None) -> FastAPI:
         async def refresh():
             nonlocal refresh_error, refresh_result
             try:
-                refresh_result = await resolved(graph.refresh_all())
+                refresh_result = await resolved(graph.refresh_changed() if changed_only else graph.refresh_all())
                 if refresh_result.get("status") == "partial_failure":
-                    refresh_error = "Индекс обновлён частично. Список недоступных ресурсов показан в статусе индекса."
+                    refresh_error = ("Не все ресурсы удалось сверить с IACPaaS — работа идёт по сохранённому индексу. "
+                                     "Подробности — в статусе индекса." if changed_only else
+                                     "Индекс обновлён частично. Список недоступных ресурсов показан в статусе индекса.")
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -355,6 +421,11 @@ def create_app(settings=None) -> FastAPI:
                 refresh_error = "Не удалось обновить индекс. Проверьте учётные данные и подключение к IACPaaS."
         refresh_task = asyncio.create_task(refresh())
         return {"ok": True, "status": "started"}
+
+    @app.post("/api/index/refresh", status_code=202)
+    async def refresh_index():
+        """Кнопка «Обновить из IACPaaS» — полная загрузка всех ресурсов, независимо от дат."""
+        return start_refresh()
 
     static = Path(__file__).parent / "static"
     if static.is_dir():

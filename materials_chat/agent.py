@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import time
@@ -22,13 +23,16 @@ from langchain.agents.middleware import AgentMiddleware, ModelResponse
 from langchain_core.messages import (AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage,
                                      convert_to_messages)
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from mcp import types
 
-from .openrouter import REASONING, ProviderError, as_provider_error, create_chat_model, reasoning_fragments
+from .openrouter import (REASONING, ProviderError, ThinkFilter, as_provider_error, create_chat_model,
+                         reasoning_fragments, strip_thinking)
 from .prompts import FINAL_STEP_NOTE, SYSTEM_PROMPT
 from .sessions import SessionStore
 from .usage import add_usage, empty_usage, request_usage
 
 log = logging.getLogger(__name__)
+WRITE_TOOLS = ("write_inforesource", "delete_inforesource")
 
 
 @dataclass
@@ -43,10 +47,19 @@ class TurnResult:
     interrupted: bool = False
 
 
+# Окно, если его не сообщили ни провайдер, ни LM Studio, ни MODEL_CONTEXT_TOKENS.
+DEFAULT_CONTEXT_TOKENS = 32768
+
+
+def context_window(settings, model_info: dict | None) -> int:
+    """Окно контекста модели: MODEL_CONTEXT_TOKENS, иначе из каталога провайдера, иначе по умолчанию."""
+    return (getattr(settings, "model_context_tokens", None) or (model_info or {}).get("context_window")
+            or DEFAULT_CONTEXT_TOKENS)
+
+
 def context_budget(settings, model_info: dict | None) -> int:
     """Сколько токенов истории можно отправить: окно модели минус место под ответ."""
-    window = getattr(settings, "model_context_tokens", None) or (model_info or {}).get("context_window") or 32768
-    budget = window - getattr(settings, "max_output_tokens", 4096)
+    budget = context_window(settings, model_info) - getattr(settings, "max_output_tokens", 4096)
     soft_limit = getattr(settings, "max_context_tokens", None)
     return min(budget, soft_limit) if soft_limit else budget
 
@@ -56,7 +69,7 @@ def to_dicts(messages: list) -> list[dict]:
     result = []
     for message in messages:
         if isinstance(message, AIMessage):
-            item = {"role": "assistant", "content": str(message.text)}
+            item = {"role": "assistant", "content": strip_thinking(str(message.text))}
             calls = [{"id": call["id"], "type": "function", "function": {
                 "name": call["name"], "arguments": json.dumps(call["args"], ensure_ascii=False)}}
                 for call in message.tool_calls]
@@ -115,6 +128,7 @@ class TurnPolicy(AgentMiddleware):
         self.max_calls = getattr(agent.settings, "max_tool_calls", 16)
         self.steps = 0      # обращений к модели в этом ходе
         self.calls = 0      # выполненных вызовов инструментов
+        self.done: dict[tuple, int] = {}  # удачные читающие вызовы хода: (имя, аргументы) → шаг
 
     async def awrap_model_call(self, request, handler):
         step, self.steps = self.steps, self.steps + 1
@@ -153,23 +167,49 @@ class TurnPolicy(AgentMiddleware):
         entry = {"id": call["id"], "name": call["name"], "arguments": call.get("args") or {}}
         self.agent.result.trace.append(entry)  # порядок журнала — порядок вызовов, а не их завершения
         write(("tool_start", dict(entry)))
+        # Запрос подтверждения приходит в задаче MCP-сессии, а писатель LangGraph читает
+        # конфигурацию из контекста узла — поэтому вызываем его в копии этого контекста.
+        context = contextvars.copy_context()
+        self.agent.writer = lambda event: context.run(write, event)
+        if call["name"] in WRITE_TOOLS:
+            self.agent.awaiting_confirmation.append(entry)
         started = time.monotonic()
-        allowed = self.calls < self.max_calls
+        key = (call["name"], json.dumps(entry["arguments"], ensure_ascii=False, sort_keys=True))
+        # Повтор удачного чтения с теми же аргументами не выполняется: результат уже есть в истории хода.
+        # Запись повтором не считается никогда, а после удачной записи чтение выполняется заново.
+        reading = call["name"] not in WRITE_TOOLS
+        earlier = self.done.get(key) if reading else None
+        allowed = earlier is None and self.calls < self.max_calls
         if allowed:
             self.calls += 1
+            if reading:  # регистрация при старте: одинаковые параллельные вызовы шага выполняются один раз
+                self.done[key] = self.steps
         try:
-            if allowed:
+            if earlier is not None:
+                where = "в этом же шаге" if earlier == self.steps else f"на шаге {earlier}"
+                output = {"ok": False, "error": {"code": "REPEATED_CALL", "message":
+                          f"Такой же вызов с теми же аргументами уже выполнен {where}; его результат "
+                          "в истории. Используйте его, а не повторяйте вызов."}}
+            elif allowed:
                 output = tool_output(await handler(request))
             else:
                 output = {"ok": False, "error": {"code": "tool_limit",
                                                  "message": "Достигнут лимит вызовов инструментов на один вопрос."}}
         except asyncio.CancelledError:
+            if reading and allowed:
+                self.done.pop(key, None)
+            self.agent.settle_confirmation(entry, None)
             entry.update(result={"ok": False, "error": {"code": "cancelled", "message": "Вызов остановлен пользователем."}},
                          duration_ms=round((time.monotonic() - started) * 1000), is_error=True)
             raise
         except Exception:
             log.exception("Инструмент MCP %s завершился ошибкой", call["name"])
             output = {"ok": False, "error": {"code": "mcp_error", "message": "Не удалось выполнить инструмент MCP."}}
+        self.agent.settle_confirmation(entry, output)
+        if allowed and reading and not output.get("ok"):
+            self.done.pop(key, None)  # неудачный вызов можно повторить (например, после таймаута платформы)
+        if allowed and not reading and output.get("ok"):
+            self.done.clear()  # данные изменились: прежние чтения устарели
         entry.update(result=output, duration_ms=round((time.monotonic() - started) * 1000),
                      is_error=not output.get("ok", False))
         write(("tool_end", dict(entry)))
@@ -178,19 +218,67 @@ class TurnPolicy(AgentMiddleware):
 
 
 class Agent:
-    def __init__(self, settings, tools_factory=None, model=None, model_info: dict | None = None):
+    def __init__(self, settings, tools_factory=None, model=None, model_info: dict | None = None,
+                 confirmations=None):
         self.settings = settings
+        # confirmations — подтверждения пользователя для записывающих инструментов (веб-интерфейс).
+        # Без них клиент MCP не заявляет elicitation, и сервер в записи отказывает.
+        self.confirmations = confirmations
         if tools_factory is None:
             from .mcp_client import mcp_tools
-            tools_factory = mcp_tools
+
+            def tools_factory(settings):
+                return mcp_tools(settings, elicitation=self.elicit if self.confirmations is not None else None)
         self.tools_factory = tools_factory
         self.model = model
         self.model_info = model_info
         self.result = TurnResult()
+        self.writer = None
+        self.awaiting_confirmation: list[dict] = []  # записывающие вызовы без карточки подтверждения
+
+    async def elicit(self, context, params: types.ElicitRequestParams):
+        """Запрос подтверждения от MCP-сервера → карточка в журнале хода → решение пользователя.
+
+        Ответ «принять» даёт только эндпоинт решения; у модели пути подтвердить нет.
+        """
+        entry = self.awaiting_confirmation.pop(0) if self.awaiting_confirmation else None
+        timeout = getattr(self.settings, "write_confirm_timeout_seconds", 120)
+        confirmation_id, decision = self.confirmations.open()
+        card = {"id": confirmation_id, "message": params.message, "status": "pending", "timeout_seconds": timeout,
+                "danger": bool(entry and entry["name"] == "delete_inforesource")}
+        if entry is not None:
+            entry["confirmation"] = card
+        if self.writer:
+            self.writer(("confirm_request", {**card, "call_id": entry and entry["id"], "tool": entry and entry["name"]}))
+        try:
+            # Сервер ждёт столько же и сам отменяет запись по таймауту; здесь — запас на доставку.
+            accepted = await asyncio.wait_for(decision, timeout + 5)
+        except asyncio.TimeoutError:
+            card["status"] = "expired"
+            return types.ElicitResult(action="cancel")
+        finally:
+            self.confirmations.close(confirmation_id)
+        if card["status"] == "pending":
+            card["status"] = "accepted" if accepted else "declined"
+        if accepted:
+            return types.ElicitResult(action="accept", content={"confirm": True})
+        return types.ElicitResult(action="decline")
+
+    def settle_confirmation(self, entry: dict, output: dict | None):
+        """Итог карточки к концу вызова: вышло время, ход остановлен; ожидание решения снимается."""
+        if entry in self.awaiting_confirmation:
+            self.awaiting_confirmation.remove(entry)
+        card = entry.get("confirmation")
+        if not card or card["status"] != "pending":
+            return
+        code = ((output or {}).get("error") or {}).get("code")
+        card["status"] = "expired" if code == "CONFIRMATION_TIMEOUT" else "cancelled"
+        self.confirmations.resolve(card["id"], False)
 
     async def run(self, text: str, history: list[dict]):
         """Асинхронный генератор событий (имя, данные) для потока в браузер."""
         self.result = result = TurnResult()
+        self.writer, self.awaiting_confirmation = None, []
         budget = context_budget(self.settings, self.model_info)
         self._check([{"role": "system", "content": SYSTEM_PROMPT}, *history, {"role": "user", "content": text}], budget)
         provider = getattr(self.settings, "provider_name", "API модели")
@@ -205,7 +293,7 @@ class Agent:
                 except Exception as error:
                     # Поднимаем после выхода из MCP-сессии: внутри неё библиотека anyio
                     # завернула бы ошибку в ExceptionGroup и потеряла понятный текст.
-                    failure = as_provider_error(error, provider)
+                    failure = as_provider_error(error, provider, self.settings)
                     if failure is None:
                         raise
         except asyncio.CancelledError:
@@ -222,7 +310,19 @@ class Agent:
         graph = create_agent(model, tools, system_prompt=SYSTEM_PROMPT, middleware=[policy])
         # На каждый шаг — узел модели и узел инструментов, плюс финальный ответ.
         config = {"recursion_limit": 2 * policy.max_steps + 5}
-        reply_id, wrote_text = None, False
+        reply_id, wrote_text, visible = None, False, ThinkFilter()
+
+        def show(text: str) -> list[str]:
+            """Куски видимого текста ответа; рассуждения <think>…</think> в него не попадают."""
+            nonlocal wrote_text
+            if not text:
+                return []
+            pieces = ["\n\n"] if not wrote_text and result.content else []  # новый абзац после прошлого текста
+            wrote_text = True
+            pieces.append(text)
+            result.content += "".join(pieces)
+            return pieces
+
         async for mode, payload in graph.astream({"messages": messages}, config,
                                                  stream_mode=["messages", "custom", "values"]):
             if mode == "custom":            # события TurnPolicy: статус, начало и конец вызова
@@ -231,14 +331,14 @@ class Agent:
                 result.model_messages = to_dicts(complete_groups(payload["messages"][start:]))
             elif isinstance(payload[0], AIMessageChunk) and payload[0].text:
                 chunk = payload[0]           # текст ответа модели по мере генерации
+                pieces = []
                 if chunk.id != reply_id:
-                    reply_id, wrote_text = chunk.id, False
-                if not wrote_text and result.content:  # новый абзац после прошлого текста
-                    result.content += "\n\n"
-                    yield "answer_delta", {"text": "\n\n"}
-                wrote_text = True
-                result.content += chunk.text
-                yield "answer_delta", {"text": chunk.text}
+                    pieces = show(visible.flush())
+                    reply_id, wrote_text, visible = chunk.id, False, ThinkFilter()
+                for piece in pieces + show(visible.feed(chunk.text)):
+                    yield "answer_delta", {"text": piece}
+        for piece in show(visible.flush()):
+            yield "answer_delta", {"text": piece}
 
         # Ответ текстом — ход завершён.
         assistant = result.model_messages[-1]

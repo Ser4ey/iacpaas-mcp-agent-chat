@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "iacpaas": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["-m", "materials_chat.mcp_server", "--transport", "stdio"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    }
+  }
+}

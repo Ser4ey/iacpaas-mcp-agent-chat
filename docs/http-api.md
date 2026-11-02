@@ -20,14 +20,16 @@
   "last_input_tokens": 6120,
   "cost": 0.1175,
   "currency": "RUB",
-  "cost_known": true
+  "cost_known": true,
+  "free": false
 }
 ```
 
 - `requests` — сколько обращений к модели было (ответ с инструментами — это несколько обращений).
 - `known: false` — провайдер не прислал usage хотя бы для одного обращения; числа тогда — нижняя оценка.
 - `last_input_tokens` — входные токены последнего обращения, то есть фактический размер контекста.
-- `cost` — стоимость в `currency` (`"RUB"` у RouterAI, `"USD"` у OpenRouter). `null`, если цены модели неизвестны.
+- `cost` — стоимость в `currency` (`"RUB"` у RouterAI, `"USD"` у OpenRouter, `null` — валюта неизвестна, например у локальной модели с `PRICE_*`). `null` — стоимость неизвестна: провайдер её не прислал (`usage.cost`), а цен модели нет; в сумме по диалогу — `null`, если неизвестна стоимость всех обращений. `cost_known: false` при числе в `cost` — стоимость известна не по всем обращениям, сумма — нижняя оценка («≥» в интерфейсе).
+- `free: true` — локальная модель без цен: `cost` равен 0, интерфейс пишет «бесплатно». В сумме по диалогу `free` — только если бесплатны все обращения.
 
 ### Результат инструмента (внутри trace)
 
@@ -58,8 +60,17 @@
 | `local_index` | Локальный поисковый индекс (снимок платформы) |
 | `local_index_fallback` | Платформа недоступна, взято из индекса; причина в `meta.live_error` |
 
-Для `iacpaas_live` в `meta` есть `fetched_at`, для индекса — `indexed_at`.
+Для `iacpaas_live` в `meta` есть `fetched_at`, для индекса — `indexed_at`; у записи — `written_at`.
 У ошибки: `ok: false`, `error: {"code": "NODE_NOT_FOUND", "message": "…", "retryable": false}`.
+
+У записывающего вызова (`write_inforesource`, `delete_inforesource`), для которого запрашивалось подтверждение, есть поле `confirmation`:
+
+```json
+"confirmation": {"id": "5f0c…", "message": "Создать папку «Демо агента» в корне фонда.",
+                 "status": "accepted", "timeout_seconds": 120, "danger": false}
+```
+
+`status`: `accepted` — подтверждено, `declined` — отменено, `expired` — время вышло, `cancelled` — ход остановлен или страница закрыта; `pending` бывает только пока карточка ждёт решения. `danger: true` — удаление. Успешная запись: `data = {"operation", "path", "platform": {"success", "code"}}`. Коды отказов записи перечислены в [api-mapping.md](api-mapping.md#запись-write_inforesource-и-delete_inforesource).
 
 ## Эндпоинты
 
@@ -77,19 +88,30 @@
     "currency": "RUB",
     "price_input_per_million": 5.36,
     "price_output_per_million": 9.57,
-    "source": "provider"
+    "source": "provider",
+    "context_source": "provider",
+    "free": false
   },
-  "limits": {"context_budget": 1044480, "max_output_tokens": 4096, "max_tool_steps": 8, "max_tool_calls": 16},
+  "limits": {"context_budget": 1044480, "context_window": 1048576, "max_output_tokens": 4096,
+             "max_tool_steps": 8, "max_tool_calls": 16},
   "index": {
     "ready": true, "resources_indexed": 8, "total_resources": 8, "nodes": 94569,
-    "last_synced": "2026-10-18T09:59:24+00:00", "busy": false, "current_resource": null,
-    "errors": {}, "refresh_running": false, "refresh_error": null
+    "last_synced": "2026-10-18T09:59:24+00:00", "busy": false, "current_resource": null, "checking": false,
+    "last_check": {"checked_at": "2026-11-02T13:05:41+00:00", "unchanged": ["materials", "…"], "updated": [], "failed": {}},
+    "errors": {}, "refresh_running": false, "refresh_error": null, "refresh_result": {"status": "complete", "mode": "changed", "…": "…"}
   },
   "resources": [{"id": "materials", "title": "Справочник по материалам", "path": "Загрузки / …", "kind": "information"}]
 }
 ```
 
-`model_info.source`: `provider` — данные получены из каталога моделей провайдера, `settings` — из `.env`, `unknown` — неизвестны (тогда цены и окно `null`).
+- `configured` — модель настроена: есть `ROUTERAI_MODEL` и, для облачного провайдера, ключ. Локальному серверу ключ не нужен (`missing_settings` его не содержит), `provider` у него — `"Локальная модель"`.
+- `model_info.source`: `provider` — данные получены из каталога моделей провайдера, `settings` — из `.env`, `unknown` — неизвестны (тогда цены и окно `null`).
+- `model_info.context_source` — откуда окно контекста: `provider` (каталог), `lmstudio` (окно, с которым модель загружена в LM Studio), `settings` (`MODEL_CONTEXT_TOKENS`), `default` (никто не сообщил — `context_window: null`, действует окно по умолчанию 32 768); `null` — каталог ещё не прочитан.
+- `model_info.free` — локальная модель без цен (стоимость — «бесплатно»). `currency` может быть `null`.
+- `limits.context_window` — окно, по которому считается бюджет (`MODEL_CONTEXT_TOKENS`, иначе из каталога, иначе 32 768); `context_budget` — оно минус `max_output_tokens` или мягкий лимит `MAX_CONTEXT_TOKENS`.
+- `index.checking` — идёт сверка дат при старте (а не полная загрузка); `current_resource` — ресурс, который сверяется или загружается сейчас.
+- `index.last_check` — итог последней сверки: когда (`checked_at`), какие ресурсы не изменились (`unchanged`), какие переиндексированы (`updated`), какие сверить не удалось (`failed`: `id` → причина). Ошибка выгрузки изменившегося ресурса — в `errors`, как при полной загрузке. До первой сверки — `null`.
+- `index.refresh_result` — итог последнего обновления; у сверки `mode: "changed"`. `refresh_error` — общий текст ошибки обновления.
 
 ### `GET /api/data/overview`
 
@@ -128,7 +150,7 @@
 
 ### `POST /api/index/refresh` → `202 {"ok": true, "status": "started" | "running"}`
 
-Запускает перезагрузку ресурсов из IACPaaS. Ход виден в `GET /api/status` → `index`.
+Полная загрузка всех ресурсов из IACPaaS, без сверки дат (кнопка «Обновить из IACPaaS»). Ход виден в `GET /api/status` → `index`. Сверку дат с обновлением только изменившихся ресурсов приложение запускает само при старте, если индекс уже есть (`AUTO_SYNC_ON_START`); пока идёт одно обновление, второе не начинается (`"status": "running"`).
 
 ### Диалоги
 
@@ -193,6 +215,7 @@
 | `session` | `{"id", "title"}` | Сразу; title обновляется по первому вопросу |
 | `status` | `{"message"}` | Что агент делает сейчас |
 | `tool_start` | `{"id", "name", "arguments"}` | Начало вызова инструмента |
+| `confirm_request` | `{"id", "call_id", "tool", "message", "danger", "timeout_seconds", "status": "pending"}` | Записывающий вызов ждёт решения пользователя (между `tool_start` и `tool_end` этого вызова) |
 | `tool_end` | результат инструмента (см. выше) | Конец вызова |
 | `answer_delta` | `{"text"}` | Очередной кусок ответа (склеивать) |
 | `answer_meta` | `{"grounded", "tool_calls", "truncated"}` | После ответа; `truncated` — упёрлись в лимит длины |
@@ -205,8 +228,16 @@
 
 Сумма по диалогу (`usage` диалога) включает стоимость проверок ответов.
 
-Ошибки до начала потока: `404` (нет диалога), `409` (ответ уже формируется), `503` (не настроен ключ или модель),
+Ошибки до начала потока: `404` (нет диалога), `409` (ответ уже формируется), `503` (не настроена модель или, для облачного провайдера, ключ),
 `422` (пустое сообщение). Тело: `{"detail": "текст"}`.
+
+Остановка хода («Стоп») или закрытая страница отменяет все ожидающие подтверждения этого диалога: запись не выполняется.
+
+### `POST /api/sessions/{id}/confirmations/{confirmation_id}` — решение по записи
+
+Тело: `{"accept": true}` или `{"accept": false}`. Ответ: `{"ok": true, "status": "accepted" | "declined"}`. Работает, пока в диалоге идёт ответ: агент ждёт именно это решение. MCP-сервер выполняет запись только после `accept: true`; `accept: false` даёт модели `CONFIRMATION_DECLINED`.
+
+`404` — запроса нет, он из другого диалога, время вышло, ход остановлен или решение уже принято. Повторно решить нельзя.
 
 ### `POST /api/sessions/{id}/messages/{message_id}/verify` — проверить ответ
 
@@ -231,6 +262,6 @@
 | `404` | Нет такого ответа |
 | `409` | В диалоге сейчас формируется ответ |
 | `422` | В диалоге нет данных из базы, проверять не по чему |
-| `503` | Не настроен ключ или модель |
+| `503` | Не настроена модель или, для облачного провайдера, ключ |
 
 Ошибки внутри потока — событие `error` с кодом: `context_limit` (данные диалога не помещаются в контекст проверяющего), `verifier_bad_output` (неожиданный формат ответа проверяющего), `verifier_truncated` (отчёт обрезан лимитом длины), коды ошибок провайдера, `verifier_error` (внутренняя ошибка, подробности в окне сервера).

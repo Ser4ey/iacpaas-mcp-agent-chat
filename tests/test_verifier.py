@@ -166,6 +166,12 @@ def test_plain_json_answer_is_accepted():
     assert verify(provider, settings())["verdict"] == "подтверждён"
 
 
+def test_local_model_report_after_think_block_is_accepted():
+    # Локальный сервер не соблюдает tool_choice="required": отчёт приходит текстом после рассуждения.
+    report = "<think>Сверяю хром с данными.</think>\n```json\n" + json.dumps({"claims": CLAIMS[:1]}, ensure_ascii=False) + "\n```"
+    assert verify(Provider(text_reply(report)), settings())["verdict"] == "подтверждён"
+
+
 @pytest.mark.parametrize("case, code", [("no_data", "no_data"), ("garbage", "verifier_bad_output"),
                                         ("oversized", "context_limit")])
 def test_clear_errors(case, code):

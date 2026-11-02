@@ -135,6 +135,12 @@ def test_request_uses_routerai_fields():
     # RouterAI ждёт max_tokens; ChatOpenAI сам по себе отправил бы max_completion_tokens.
     assert body["max_tokens"] == 1800 and "max_completion_tokens" not in body
     assert body["tools"][0]["function"]["name"] == "search_graph"
+    assert "temperature" not in body  # не задана — решает провайдер
+
+
+def test_temperature_from_settings_reaches_the_provider():
+    _, _, provider, _ = run_agent(model_temperature=0)
+    assert provider.requests[0]["temperature"] == 0
 
 
 def test_provider_cost_and_reasoning_are_kept():
@@ -160,6 +166,16 @@ def test_provider_cost_and_reasoning_are_kept():
     assert sent["reasoning_details"] == fragments
 
 
+def test_think_block_of_a_local_model_is_not_shown_or_stored():
+    # Тег разрезан между кусками потока, как его присылает локальный сервер по токенам.
+    reply = [event({"role": "assistant", "content": "<thi"}), event({"content": "nk>Ищу в данных размер</th"}),
+             event({"content": "ink>\n\n"}), event({"content": "По базе: 25."}), event({}, "stop")]
+    agent, _, _, events = run_agent(provider=Provider(tool_reply("search_graph"), reply))
+    shown = "".join(payload["text"] for name, payload in events if name == "answer_delta")
+    assert shown == agent.result.content == "По базе: 25."
+    assert agent.result.model_messages[-1]["content"] == "По базе: 25."
+
+
 def test_small_talk_is_answered_without_tools_and_not_replaced():
     provider = Provider(text_reply("Здравствуйте! Спросите меня о сплавах."))
     agent, tools, _, events = run_agent(provider=provider)
@@ -170,7 +186,9 @@ def test_small_talk_is_answered_without_tools_and_not_replaced():
 
 
 def test_exhausted_steps_end_with_a_forced_final_answer():
-    provider = Provider(tool_reply("search_graph"), tool_reply("search_graph"), text_reply("Итог по найденному."))
+    # Запросы разные: одинаковый повтор не выполнялся бы (REPEATED_CALL).
+    provider = Provider(call_reply("a", "search_graph", {"query": "порошок"}),
+                        call_reply("b", "search_graph", {"query": "гранулы"}), text_reply("Итог по найденному."))
     agent, tools, provider, _ = run_agent(provider=provider, max_tool_steps=2)
     assert len(tools.calls) == 2
     assert [body["tool_choice"] for body in provider.requests] == ["auto", "auto", "none"]
@@ -190,7 +208,10 @@ def test_tool_request_on_the_final_step_is_not_executed():
 
 
 def test_calls_over_the_limit_get_an_error_answer_each():
-    provider = Provider(tool_reply("search_graph", "search_graph", "search_graph"), text_reply("Ответ по двум."))
+    calls = [{"index": index, "id": f"call{index}", "type": "function", "function": {
+        "name": "search_graph", "arguments": json.dumps({"query": query}, ensure_ascii=False)}}
+        for index, query in enumerate(["сталь", "медь", "титан"])]
+    provider = Provider([event({"role": "assistant", "tool_calls": calls}, "tool_calls")], text_reply("Ответ по двум."))
     agent, tools, provider, _ = run_agent(provider=provider, max_tool_calls=2)
     assert len(tools.calls) == 2
     codes = [item["result"].get("error", {}).get("code") for item in agent.result.trace]
@@ -702,3 +723,83 @@ def test_verify_rejects_wrong_targets_without_calling_the_model(tmp_path):
         app.state.locks[session_id] = lock
         assert client.post(f"/api/sessions/{session_id}/messages/{answer['id']}/verify").status_code == 409
     assert not provider.requests
+
+
+def call_reply(call_id, name, arguments):
+    call = {"index": 0, "id": call_id, "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)}}
+    return [event({"role": "assistant", "tool_calls": [call]}, "tool_calls")]
+
+
+class ReadWriteTools:
+    """search_graph и write_inforesource; запоминает фактические вызовы."""
+
+    def __init__(self):
+        self.calls = []
+
+    @asynccontextmanager
+    async def __call__(self, _settings):
+        async def search_graph(query: str = "") -> tuple:
+            self.calls.append(("search_graph", query))
+            result = {"ok": True, "data": {"hits": [], "total": 0}}
+            return json.dumps(result), {"structured_content": result}
+
+        async def write_inforesource(name: str = "") -> tuple:
+            self.calls.append(("write_inforesource", name))
+            result = {"ok": True, "data": {"operation": "create_folder", "path": name}}
+            return json.dumps(result), {"structured_content": result}
+        yield [StructuredTool.from_function(coroutine=search_graph, name="search_graph", description="Поиск",
+                                            response_format="content_and_artifact"),
+               StructuredTool.from_function(coroutine=write_inforesource, name="write_inforesource",
+                                            description="Запись", response_format="content_and_artifact")]
+
+
+def run_scripted(*replies):
+    tools, provider = ReadWriteTools(), Provider(*replies)
+    config = settings(max_tool_steps=6)
+    agent = Agent(config, tools, provider.model(config))
+
+    async def run():
+        return [item async for item in agent.run("Вопрос", [])]
+    return agent, tools, asyncio.run(run())
+
+
+def test_repeated_identical_call_is_not_executed_again():
+    agent, tools, _ = run_scripted(call_reply("a", "search_graph", {"query": "сталь"}),
+                                   call_reply("b", "search_graph", {"query": "сталь"}),
+                                   call_reply("c", "search_graph", {"query": "медь"}), text_reply("Готово."))
+    assert tools.calls == [("search_graph", "сталь"), ("search_graph", "медь")]
+    repeated = agent.result.trace[1]
+    assert repeated["result"]["error"]["code"] == "REPEATED_CALL" and "шаге 1" in repeated["result"]["error"]["message"]
+    assert agent.result.trace[2]["result"]["ok"] is True
+
+
+def test_writes_are_never_repeats_and_reads_after_a_write_run_again():
+    _, tools, _ = run_scripted(call_reply("a", "search_graph", {"query": "сталь"}),
+                               call_reply("b", "write_inforesource", {"name": "Папка"}),
+                               call_reply("c", "write_inforesource", {"name": "Папка"}),
+                               call_reply("d", "search_graph", {"query": "сталь"}), text_reply("Готово."))
+    assert tools.calls == [("search_graph", "сталь"), ("write_inforesource", "Папка"),
+                           ("write_inforesource", "Папка"), ("search_graph", "сталь")]
+
+
+def test_failed_call_may_be_retried():
+    tools, provider = Tools({"ok": False, "error": {"code": "PLATFORM_TIMEOUT", "message": "нет ответа"}}), Provider(
+        call_reply("a", "search_graph", {"query": "сталь"}), call_reply("b", "search_graph", {"query": "сталь"}),
+        text_reply("Платформа не ответила."))
+    config = settings()
+    agent = Agent(config, tools, provider.model(config))
+    asyncio.run(_drain(agent))
+    assert len(tools.calls) == 2
+
+
+async def _drain(agent):
+    return [item async for item in agent.run("Вопрос", [])]
+
+
+def test_identical_parallel_calls_of_one_step_run_once():
+    provider = Provider(tool_reply("search_graph", "search_graph"), text_reply("Готово."))
+    agent, tools, provider, _ = run_agent(provider=provider)
+    assert len(tools.calls) == 1
+    codes = [item["result"].get("error", {}).get("code") for item in agent.result.trace]
+    assert codes == [None, "REPEATED_CALL"] and "в этом же шаге" in agent.result.trace[1]["result"]["error"]["message"]

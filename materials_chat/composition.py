@@ -8,6 +8,13 @@ FORM_UNLISTED = "не указан в составе"
 FORM_NONE = "нет значения"
 FORM_AGGREGATE = "Совокупность химических элементов"
 FORM_CALCULATED = "Расчетное"
+FORM_BALANCE = "Основа (остаток)"
+# Версия правил таблицы состава: при её смене таблица пересобирается из индекса без синхронизации.
+COMPOSITION_VERSION = 2
+
+
+def state_key(indexed_at: str) -> str:
+    return f"{indexed_at}#v{COMPOSITION_VERSION}"
 
 _TEXT_CALCULATED = "расчётное значение, см. запись марки"
 _TEXT_AGGREGATE = "в совокупности с другими элементами, см. запись марки"
@@ -92,7 +99,25 @@ def _material_record(nodes, children, material_id, classes) -> dict:
                             contents.setdefault(nodes[member]["label"],
                                                 _entry(FORM_AGGREGATE, None, None, _TEXT_AGGREGATE))
                 # «Прочее» — не элемент, в таблицу не попадает.
+    _balance_base(record)
     return record
+
+
+def _balance_base(record: dict):
+    """Основа, записанная «не более X», — остаток до 100 %: её нижняя граница — 100 % минус верхние
+    границы остальных элементов. Иначе «железа больше 5 %» не проходит ни одна такая сталь.
+
+    Считается, только если в составе есть другие элементы и у всех известна верхняя граница; не выше X.
+    """
+    base = record["contents"].get(record["base"] or "")
+    if not base or base["form"] != "Не более":
+        return
+    others = [item for symbol, item in record["contents"].items() if symbol != record["base"]]
+    if not others or any(item["high"] is None for item in others):
+        return  # в записи только основа или у примеси неизвестный предел — остаток не определить
+    low = round(min(base["high"], max(0.0, 100.0 - sum(item["high"] for item in others))), 4)
+    base.update(form=FORM_BALANCE, low=low,
+                text=f"основа, остаток до 100 %: {low}–{base['high']} % (в записи — не более {base['high']} %)")
 
 
 def material_records(nodes: dict[str, dict], children: dict[str, list[str]]) -> list[dict]:
@@ -133,12 +158,13 @@ def rebuild_composition(db: sqlite3.Connection, resource_id: str, indexed_at: st
         db.executemany("INSERT OR IGNORE INTO composition_elements VALUES (?,?,?,?,?,?,?)",
                        [(resource_id, record["node_id"], symbol, item["form"], item["low"], item["high"], item["text"])
                         for symbol, item in record["contents"].items()])
-    db.execute("INSERT INTO composition_state VALUES (?,?)", (resource_id, indexed_at))
+    db.execute("INSERT INTO composition_state VALUES (?,?)", (resource_id, state_key(indexed_at)))
     return len(records)
 
 
 RULES = ("«> X» — нижняя граница диапазона больше X; «< X» — верхняя граница меньше X; "
-         "марки без элемента в составе проходят «<» только с include_unlisted")
+         "марки без элемента в составе проходят «<» только с include_unlisted; "
+         "основа «не более X» — остаток до 100 % (форма «Основа (остаток)»)")
 MAX_CONDITIONS = 10
 _NUMERIC = {">", ">=", "<", "<="}
 _OPS = _NUMERIC | {"present", "absent"}

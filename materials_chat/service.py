@@ -18,10 +18,14 @@ from .composition import (RULES, ConditionError, class_names, in_class, parse_co
                           resolve_element, select_materials)
 from .config import Settings
 from .graph_store import GraphStore, subgraph_from_export
+from .ontology import ONTOLOGIES, Ontology, OntologyError
 from .platform import PlatformClient, PlatformError, concept_path, utc_now
 
 log = logging.getLogger(__name__)
 
+STRUCTURE_LEGEND = ("Дерево понятий онтологии: строка — понятие [вид], отступ — вложенность. Для create_resource: "
+                    "concept — имя понятия; у вершины — name («нужно имя» — обязательно, иначе имя = понятие); "
+                    "у значения — value указанного типа; «не поддерживается» — такие вершины создать нельзя.")
 # Самая глубокая запись марки — 7 уровней от вершины марки: любая запись читается одним вызовом.
 MAX_DEPTH = 8
 COMPOSITION_RESOURCE = "materials"
@@ -68,6 +72,8 @@ class GraphService:
         self._refresh_lock = asyncio.Lock()
         self._sync_errors: dict[str, str] = {}
         self._current_resource: str | None = None
+        self._checking = False                    # идёт проверка дат, а не полная загрузка
+        self._last_check: dict | None = None      # итог последней проверки актуальности индекса
         # Короткий кэш живых выгрузок: модель часто листает один подграф по страницам.
         self._live_cache: dict[tuple, tuple[float, dict]] = {}
 
@@ -82,6 +88,7 @@ class GraphService:
                 "nodes": sum(item["node_count"] for item in existing),
                 "last_synced": min((item["indexed_at"] for item in existing), default=None),
                 "busy": self._refresh_lock.locked(), "current_resource": self._current_resource,
+                "checking": self._checking, "last_check": self._last_check,
                 "errors": dict(self._sync_errors)}
 
     async def refresh_all(self) -> dict:
@@ -108,6 +115,54 @@ class GraphService:
             finally:
                 self._current_resource = None
         return {"status": "complete" if not self._sync_errors else "partial_failure", "resources": results, **self.status()}
+
+    async def refresh_changed(self) -> dict:
+        """Обновить только изменившиеся ресурсы: дата изменения корня на платформе против даты в индексе.
+
+        Дату даёт лёгкая выгрузка корня (export-depth=0). Совпала — ресурс не выгружается; изменилась
+        (или ресурса нет в индексе) — выгружается целиком и переиндексируется. Ошибка платформы при проверке
+        индекс не трогает: работа продолжается по сохранённому снимку.
+        """
+        if self._refresh_lock.locked():
+            return {"status": "already_running"}
+        # failed — дату сверить не удалось; ошибки выгрузки изменившегося ресурса — в errors, как при полной загрузке.
+        unchanged, updated, failed, broken = [], [], {}, []
+        async with self._refresh_lock:
+            self._checking = True
+            try:
+                for item in self.definitions:
+                    self._current_resource = item.title
+                    indexed = self.store.resource(item.id)
+                    if indexed is not None:
+                        try:
+                            date = (await self.client.export(item.path, depth=0)).get("date")
+                        except PlatformError as error:
+                            failed[item.id] = error.message
+                            continue
+                        if date is None:
+                            failed[item.id] = "Платформа не сообщила дату изменения ресурса."
+                            continue
+                        if str(date) == str(indexed["metadata"].get("date")):
+                            unchanged.append(item.id)
+                            continue
+                    try:
+                        graph = await self.client.export(item.path)
+                        await asyncio.to_thread(self.store.import_graph, item.id, graph)
+                        self._sync_errors.pop(item.id, None)
+                        updated.append(item.id)
+                    except PlatformError as error:
+                        self._remember_sync_error(item.id, error.message)
+                        broken.append(item.id)
+                    except Exception:
+                        log.exception("Не удалось проиндексировать ресурс %s", item.id)
+                        self._remember_sync_error(item.id, "Не удалось разобрать или сохранить ресурс.")
+                        broken.append(item.id)
+            finally:
+                self._current_resource = None
+                self._checking = False
+                self._last_check = {"checked_at": utc_now(), "unchanged": unchanged, "updated": updated, "failed": failed}
+        return {"status": "complete" if not failed and not broken else "partial_failure", "mode": "changed",
+                **self._last_check, **self.status()}
 
     def _remember_sync_error(self, resource_id: str, message: str):
         self._sync_errors[resource_id] = message
@@ -197,9 +252,15 @@ class GraphService:
         if isinstance(metadata.get("ontology"), str):
             metadata["ontology"] = self._relative_path(metadata["ontology"])
         metadata["context"] = [self._relative_path(value) for value in (metadata.get("context") or [])]
-        return ToolResult(ok=True, data={**definition.model_dump(), "metadata": metadata,
-                          "nodes": indexed["node_count"], "edges": indexed["edge_count"],
-                          "root": str(metadata.get("id", ""))}, meta=meta)
+        data = {**definition.model_dump(), "metadata": metadata, "nodes": indexed["node_count"],
+                "edges": indexed["edge_count"], "root": str(metadata.get("id", ""))}
+        if self.settings.write_enabled and resource_id in ONTOLOGIES:
+            try:
+                ontology = await asyncio.to_thread(Ontology.load, self.store, self.definitions, resource_id)
+                data.update(structure=ontology.structure(), structure_legend=STRUCTURE_LEGEND)
+            except OntologyError:
+                pass
+        return ToolResult(ok=True, data=data, meta=meta)
 
     def _bounded_node(self, node: dict) -> dict:
         result = dict(node)
@@ -373,15 +434,27 @@ class GraphService:
         live = subgraph_from_export(definition.id, target, base_path, depth, max_nodes, offset)
         return live, self._live_meta(definition, indexed, graph)
 
-    def count_graph(self, resource_id: str, root: str | None = None) -> ToolResult:
+    def count_graph(self, resource_id: str, root: str | None = None, concept: str | None = None) -> ToolResult:
         definition, indexed, error = self._ready(resource_id)
         if error:
             return error
         try:
             counts = self.store.counts(resource_id, root)
+            groups = self.store.concept_names(resource_id, root) if concept and concept.strip() else None
         except KeyError:
             return fail("NODE_NOT_FOUND", "Вершина не найдена в выбранном ресурсе.")
-        return ToolResult(ok=True, data=counts, meta={**self._metadata(definition, indexed), "external_links_not_expanded": True})
+        meta = {**self._metadata(definition, indexed), "external_links_not_expanded": True}
+        if groups is None:
+            return ToolResult(ok=True, data=counts, meta=meta)
+        wanted = concept.strip().casefold().replace("ё", "е")
+        name = next((key for key in groups if key.casefold().replace("ё", "е") == wanted), None)
+        if name is None:
+            popular = sorted(groups, key=lambda key: -len(groups[key]))[:30]
+            return fail("UNKNOWN_CONCEPT", f"Понятия «{concept}» в {'подграфе' if root else 'ресурсе'} нет. Понятия: "
+                        + "; ".join(f"{key} ({len(groups[key])})" for key in popular) + ".")
+        names = groups[name]
+        return ToolResult(ok=True, data={**counts, "concept": name, "count": len(names), "names": names[:50],
+                                         "names_truncated": len(names) > 50}, meta=meta)
 
     def validate_resource(self, resource_id: str) -> ToolResult:
         definition, indexed, error = self._ready(resource_id)
