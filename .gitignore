@@ -13,3 +13,4 @@ data/
 *.docx
 # Личные настройки IDE.
 .idea/
+.vscode/settings.json
