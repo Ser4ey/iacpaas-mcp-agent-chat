@@ -126,6 +126,10 @@ def create_chat_model(settings, **overrides) -> RouterAIChat:
                "max_tokens": getattr(settings, "max_output_tokens", 4096),
                "stream_usage": True, "timeout": 120, "max_retries": 2,
                "default_headers": {"X-Title": "IACPaaS Materials Study"}}
+    temperature = getattr(settings, "model_temperature", None)
+    if temperature is not None:
+        # 0 — меньше разброса между одинаковыми вопросами: модель выбирает самые вероятные шаги и формулировки.
+        options["temperature"] = temperature
     return RouterAIChat(**(options | overrides))
 
 

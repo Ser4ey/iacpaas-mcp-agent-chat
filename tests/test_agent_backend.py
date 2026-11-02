@@ -135,6 +135,12 @@ def test_request_uses_routerai_fields():
     # RouterAI ждёт max_tokens; ChatOpenAI сам по себе отправил бы max_completion_tokens.
     assert body["max_tokens"] == 1800 and "max_completion_tokens" not in body
     assert body["tools"][0]["function"]["name"] == "search_graph"
+    assert "temperature" not in body  # не задана — решает провайдер
+
+
+def test_temperature_from_settings_reaches_the_provider():
+    _, _, provider, _ = run_agent(model_temperature=0)
+    assert provider.requests[0]["temperature"] == 0
 
 
 def test_provider_cost_and_reasoning_are_kept():

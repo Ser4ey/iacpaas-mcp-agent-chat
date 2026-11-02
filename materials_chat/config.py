@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     price_output_per_million: float | None = Field(default=None, ge=0)
     price_currency: str | None = None
     max_output_tokens: int = Field(default=4096, ge=128, le=32768)
+    # Температура модели агента и проверяющего; 0 — ответы на одинаковые вопросы меньше расходятся.
+    model_temperature: float | None = Field(default=0, ge=0, le=2)
     max_tool_steps: int = Field(default=8, ge=1, le=16)
     max_tool_calls: int = Field(default=16, ge=1, le=32)
     # Старые ходы диалога уходят в модель со сжатыми результатами инструментов.
