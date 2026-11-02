@@ -35,6 +35,20 @@ export function formatCost(cost, currency) {
   return `${amount}\xa0${sign}`.trim();
 }
 
+/**
+ * Стоимость расхода модели (объект usage): «0,12 ₽»; «≥ 0,12 ₽» — провайдер сообщил её не по всем обращениям;
+ * «бесплатно» — локальная модель без цен; unknown («стоимость неизвестна») — цен нет и провайдер её не прислал.
+ * Пустая строка — обращений к модели не было.
+ */
+export function formatUsageCost(usage, { currency, unknown = 'стоимость неизвестна' } = {}) {
+  if (!usage?.requests) return '';
+  if (usage.free) return 'бесплатно';
+  const cost = formatCost(usage.cost, usage.currency ?? currency);
+  // «≥ 0,00» ничего не говорит: известна только нулевая часть суммы.
+  if (!cost || (usage.cost_known === false && !(usage.cost > 0))) return unknown;
+  return usage.cost_known === false && !cost.startsWith('<') ? `≥\xa0${cost}` : cost;
+}
+
 /** 34 → «34 мс», 1840 → «1,8 с» */
 export function formatDuration(ms) {
   if (typeof ms !== 'number' || !Number.isFinite(ms)) return '';

@@ -50,17 +50,26 @@ def parse_events(text):
     return events
 
 
+CLOUD_CATALOG = {"data": [{"id": "local-test-model", "name": "Тестовая модель", "context_length": 200000,
+                           "pricing": {"prompt": "0.000005", "completion": "0.00001"}}]}
+
+
 @asynccontextmanager
-async def stack(tmp_path, answer, platform=None):
-    """Веб-приложение + MCP-сервер + двойник модели. answer(body) -> (status, choice); platform — двойник IACPaaS."""
+async def stack(tmp_path, answer, platform=None, local=False, catalog=CLOUD_CATALOG, **overrides):
+    """Веб-приложение + MCP-сервер + двойник модели. answer(body) -> (status, choice); platform — двойник IACPaaS.
+
+    Двойник слушает 127.0.0.1; local=False — считать его облачным провайдером (с ключом и ценами),
+    local=None — определить по адресу, как в приложении (локальный сервер без ключа).
+    """
     config = tmp_path / "resources.json"
     config.write_text(json.dumps([{"id": "materials", "title": "Тестовая база", "path": "Тест", "kind": "information"}]), encoding="utf-8")
     mcp_port, web_port, provider_port = free_port(), free_port(), free_port()
-    settings = Settings(_env_file=None, data_dir=tmp_path / "data", history_path=tmp_path / "history.sqlite3",
-        resources_path=config, mcp_port=mcp_port, mcp_url=f"http://127.0.0.1:{mcp_port}/mcp",
-        openrouter_api_key="local-test-key", openrouter_model="local-test-model",
-        openrouter_base_url=f"http://127.0.0.1:{provider_port}", auto_sync_on_start=False,
-        iacpaas_username="", iacpaas_password="", live_reads=False)
+    settings = Settings(_env_file=None, **({
+        "data_dir": tmp_path / "data", "history_path": tmp_path / "history.sqlite3", "resources_path": config,
+        "mcp_port": mcp_port, "mcp_url": f"http://127.0.0.1:{mcp_port}/mcp",
+        "openrouter_api_key": "local-test-key", "openrouter_model": "local-test-model",
+        "openrouter_base_url": f"http://127.0.0.1:{provider_port}", "auto_sync_on_start": False,
+        "iacpaas_username": "", "iacpaas_password": "", "live_reads": False, "model_local": local} | overrides))
     GraphStore(settings.data_dir / "search.sqlite3").import_graph("materials", {
         "id": 1, "name": "Каталог", "title": "Тестовая база", "type": "КОРЕНЬ", "json_type": "universal",
         "ontology": "Тестовая онтология", "successors": [{"id": 2, "name": "Тестовыйсплав", "type": "НЕТЕРМИНАЛ"}]})
@@ -69,12 +78,12 @@ async def stack(tmp_path, answer, platform=None):
 
     @provider.get("/models")
     async def models():
-        return {"data": [{"id": "local-test-model", "name": "Тестовая модель", "context_length": 200000,
-                          "pricing": {"prompt": "0.000005", "completion": "0.00001"}}]}
+        return catalog
 
     @provider.post("/chat/completions")
     async def complete(request: Request):
         body = await request.json()
+        body["authorization"] = request.headers.get("authorization")
         requests.append(body)
         status, choice = answer(body)
         if status != 200:
@@ -236,3 +245,94 @@ async def test_closed_page_while_waiting_for_confirmation_writes_nothing(tmp_pat
         assert decision.status_code == 404
         await asyncio.sleep(.3)
         assert platform.writes == []
+
+
+# Каталог локального сервера (LM Studio, Ollama): только id модели — без окна контекста и без цен.
+LOCAL_CATALOG = {"data": [{"id": "local-test-model", "object": "model", "owned_by": "organization_owner"}]}
+
+
+async def loaded_status(client):
+    """Статус после того, как приложение прочитало каталог модели (он грузится в фоне при старте)."""
+    for _ in range(100):
+        status = (await client.get("/api/status")).json()
+        if status["model_info"]["source"] != "unknown":
+            return status
+        await asyncio.sleep(.05)
+    return status
+
+
+def search_then_answer(text):
+    def answer(body):
+        if any(tool["function"]["name"] == "submit_verdict" for tool in body.get("tools", [])):
+            claims = [{"text": "Найден Тестовыйсплав", "quote": "Найден Тестовыйсплав", "status": "confirmed", "node_id": "2"}]
+            return 200, {"delta": {"tool_calls": [{"index": 0, "id": "verdict", "type": "function", "function": {
+                "name": "submit_verdict", "arguments": json.dumps({"claims": claims}, ensure_ascii=False)}}]},
+                "finish_reason": "tool_calls"}
+        if not any(message["role"] == "tool" for message in body["messages"]):
+            return 200, search_call("Тестовыйсплав")
+        return 200, {"delta": {"content": text}, "finish_reason": "stop"}
+    return answer
+
+
+@pytest.mark.asyncio
+async def test_local_model_without_key_prices_and_window_answers_for_free(tmp_path):
+    answer = search_then_answer("<think>Пользователь спрашивает о сплаве.</think>\n\nНайден Тестовыйсплав.")
+    async with stack(tmp_path, answer, local=None, catalog=LOCAL_CATALOG, openrouter_api_key="") as (client, requests):
+        status = await loaded_status(client)
+        assert status["configured"] is True and status["missing_settings"] == []
+        assert status["provider"] == "Локальная модель"
+        info = status["model_info"]
+        assert info["free"] is True and info["currency"] is None
+        assert info["context_window"] is None and info["context_source"] == "default"
+        assert status["limits"]["context_window"] == 32768
+        assert status["limits"]["context_budget"] == 32768 - 4096
+
+        session = (await client.post("/api/sessions")).json()
+        response = await client.post(f"/api/sessions/{session['id']}/chat", json={"message": "Найди тестовый материал"})
+        assert response.status_code == 200
+        events = parse_events(response.text)
+        assert not [payload for name, payload in events if name == "error"]
+        assert "".join(payload["text"] for name, payload in events if name == "answer_delta") == "Найден Тестовыйсплав."
+        usage = next(payload for name, payload in events if name == "usage")
+        assert usage["turn"]["free"] is True and usage["turn"]["cost"] == 0 and usage["turn"]["currency"] is None
+        assert usage["session"]["free"] is True
+        # Ключа нет: клиент OpenAI отправляет заглушку, локальный сервер её не проверяет.
+        assert {body["authorization"] for body in requests} == {"Bearer not-needed"}
+
+        saved = (await client.get(f"/api/sessions/{session['id']}")).json()
+        assert saved["messages"][-1]["content"] == "Найден Тестовыйсплав."  # рассуждение <think> не сохранено
+        listed = (await client.get("/api/sessions")).json()["sessions"][0]
+        assert listed["usage"]["free"] is True and listed["usage"]["requests"] == 2
+
+        # Проверка ответа тоже не требует ключа; её расход — бесплатный.
+        verify = await client.post(f"/api/sessions/{session['id']}/messages/{saved['messages'][-1]['id']}/verify")
+        done = next(payload for name, payload in parse_events(verify.text) if name == "done")
+        assert done["verification"]["verdict"] == "подтверждён" and done["verification"]["usage"]["free"] is True
+        assert done["session_usage"]["free"] is True
+
+
+@pytest.mark.asyncio
+async def test_cloud_model_without_prices_has_unknown_cost_not_zero(tmp_path):
+    async with stack(tmp_path, search_then_answer("Найден Тестовыйсплав."), catalog=LOCAL_CATALOG) as (client, _):
+        status = await loaded_status(client)
+        assert status["provider"] == "API модели" and status["model_info"]["free"] is False
+        session = (await client.post("/api/sessions")).json()
+        events = parse_events((await client.post(f"/api/sessions/{session['id']}/chat",
+                                                 json={"message": "Найди тестовый материал"})).text)
+        usage = next(payload for name, payload in events if name == "usage")
+        assert usage["turn"]["cost"] is None and usage["turn"]["cost_known"] is False
+        assert usage["session"]["cost"] is None and usage["turn"]["total_tokens"] == 26
+        listed = (await client.get("/api/sessions")).json()["sessions"][0]
+        assert listed["usage"]["cost"] is None
+
+
+@pytest.mark.asyncio
+async def test_stopped_local_server_gets_a_clear_message(tmp_path):
+    async with stack(tmp_path, search_then_answer("—"), local=None, openrouter_api_key="",
+                     openrouter_base_url=f"http://127.0.0.1:{free_port()}/v1") as (client, _):
+        session = (await client.post("/api/sessions")).json()
+        events = parse_events((await client.post(f"/api/sessions/{session['id']}/chat", json={"message": "Вопрос"})).text)
+        error = next(payload for name, payload in events if name == "error")
+        assert error["code"] == "provider_connection"
+        assert error["message"].startswith("Локальный сервер модели не отвечает по адресу http://127.0.0.1:")
+        assert events[-1][0] == "done"

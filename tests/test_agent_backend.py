@@ -166,6 +166,16 @@ def test_provider_cost_and_reasoning_are_kept():
     assert sent["reasoning_details"] == fragments
 
 
+def test_think_block_of_a_local_model_is_not_shown_or_stored():
+    # Тег разрезан между кусками потока, как его присылает локальный сервер по токенам.
+    reply = [event({"role": "assistant", "content": "<thi"}), event({"content": "nk>Ищу в данных размер</th"}),
+             event({"content": "ink>\n\n"}), event({"content": "По базе: 25."}), event({}, "stop")]
+    agent, _, _, events = run_agent(provider=Provider(tool_reply("search_graph"), reply))
+    shown = "".join(payload["text"] for name, payload in events if name == "answer_delta")
+    assert shown == agent.result.content == "По базе: 25."
+    assert agent.result.model_messages[-1]["content"] == "По базе: 25."
+
+
 def test_small_talk_is_answered_without_tools_and_not_replaced():
     provider = Provider(text_reply("Здравствуйте! Спросите меня о сплавах."))
     agent, tools, _, events = run_agent(provider=provider)

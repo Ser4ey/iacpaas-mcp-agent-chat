@@ -14,7 +14,7 @@
 import { api, decideConfirmation, streamChat, streamVerify } from './api.js';
 import { renderContextView } from './context-view.js';
 import { renderDataView, renderIndexStatus } from './data-view.js';
-import { formatCompact, formatCost, formatNumber, formatShortDate, plural } from './format.js';
+import { formatCompact, formatCost, formatNumber, formatShortDate, formatUsageCost, plural } from './format.js';
 import { formatElapsed, highlightNumbers, numberCheckNode, progressNode, verdictNode } from './checks.js';
 import { renderMarkdown } from './markdown.js';
 import { ToolLog, normalizeTrace, toolActivity } from './trace.js';
@@ -206,17 +206,33 @@ function renderMeter() {
       el('span', 'meter-budget', ` из ${formatCompact(budget)}`),
     );
     context.title = `Контекст следующего вопроса: ${approx}${formatNumber(tokens)} из ${formatNumber(budget)} токенов `
-      + `(${(share * 100).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} %). Нажмите, чтобы посмотреть, что уйдёт в модель.`;
+      + `(${(share * 100).toLocaleString('ru-RU', { maximumFractionDigits: 1 })} %). Нажмите, чтобы посмотреть, что уйдёт в модель.`
+      + (info.context_source === 'default' ? `\n${windowLine(status)}` : '');
   }
 
   const usage = session?.usage ?? {};
-  const cost = formatCost(usage.cost, usage.currency ?? info.currency);
+  const cost = formatUsageCost(usage, { currency: info.currency, unknown: '—' });
   const costNode = $('meter-cost');
   costNode.hidden = !cost;
   if (cost) {
-    costNode.replaceChildren(el('span', 'meter-label', 'диалог '), costPrefix(usage, cost) + cost);
-    costNode.title = 'Стоимость всех ответов в этом диалоге';
+    costNode.replaceChildren(el('span', 'meter-label', 'диалог '), cost);
+    costNode.title = usage.free ? 'Локальная модель: за токены никто не платит'
+      : cost === '—' ? 'Стоимость диалога неизвестна: провайдер её не сообщил, а цен модели нет (их можно задать в .env, PRICE_*)'
+        : 'Стоимость всех ответов в этом диалоге';
   }
+}
+
+/** Откуда взято окно контекста: каталог провайдера, LM Studio, .env или значение по умолчанию. */
+const WINDOW_NOTES = {
+  lmstudio: ' — с ним модель загружена в LM Studio',
+  settings: ' — задано в MODEL_CONTEXT_TOKENS',
+  default: ' — по умолчанию: провайдер его не сообщил, задайте MODEL_CONTEXT_TOKENS',
+};
+
+function windowLine(status) {
+  const info = status.model_info ?? {};
+  const window = status.limits?.context_window ?? info.context_window;
+  return window ? `Окно контекста: ${formatNumber(window)} токенов${WINDOW_NOTES[info.context_source] ?? ''}` : '';
 }
 
 /** «DeepSeek: DeepSeek V4.1 Flash» → «DeepSeek V4.1 Flash». */
@@ -233,16 +249,14 @@ function describeModel(status) {
   if (prices.every((price) => typeof price === 'number')) {
     const [input, output] = prices.map((price) => formatCost(price, info.currency));
     lines.push(`1 млн токенов: вход ${input}, выход ${output}`);
+  } else if (info.free) {
+    lines.push('Бесплатно: модель работает на локальном сервере');
   } else {
-    lines.push('Цены модели неизвестны');
+    lines.push('Цены модели неизвестны: стоимость видна, только если её пришлёт провайдер');
   }
-  if (info.context_window) lines.push(`Окно контекста: ${formatNumber(info.context_window)} токенов`);
+  const window = windowLine(status);
+  if (window) lines.push(window);
   return lines.join('\n');
-}
-
-/** «≥», если провайдер прислал расход не по всем обращениям. */
-function costPrefix(usage, cost) {
-  return usage.cost_known === false && !cost.startsWith('<') ? '≥ ' : '';
 }
 
 /* ---------- Раздел «Данные» ---------- */
@@ -311,7 +325,7 @@ function sessionRow(session) {
   open.title = title;
   open.disabled = state.streaming;
   if (active) open.setAttribute('aria-current', 'true');
-  const cost = formatCost(session.usage?.cost, session.usage?.currency);
+  const cost = formatUsageCost(session.usage);
   const meta = [formatShortDate(session.updated_at), cost].filter(Boolean).join(' · ');
   open.append(el('span', 'session-title', title), el('span', 'session-meta', meta));
   open.addEventListener('click', () => openSession(session.id).catch(showError));
@@ -470,9 +484,9 @@ function renderAnswerMeta(view) {
       + (usage.requests ? `; обращений к модели: ${usage.requests}` : '');
     parts.push(tokens);
   }
-  // Нулевую стоимость без токенов (ответ остановлен до обращения к модели) не показываем.
-  const cost = usage.total_tokens || usage.cost > 0 ? formatCost(usage.cost, usage.currency) : '';
-  if (cost) parts.push(el('span', '', costPrefix(usage, cost) + cost));
+  // Ответ остановлен до обращения к модели — стоимости нет, её не показываем.
+  const cost = formatUsageCost(usage, { currency: state.status?.model_info?.currency });
+  if (cost) parts.push(el('span', '', cost));
   if (view.grounded === false) parts.push(el('span', '', 'без обращения к базе'));
   if (view.truncated) parts.push(el('span', '', 'ответ обрезан по лимиту длины'));
   const check = numberCheckNode(view.numberCheck);

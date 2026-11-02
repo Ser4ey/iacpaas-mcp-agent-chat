@@ -17,9 +17,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .agent import Agent, context_budget
+from .agent import Agent, context_budget, context_window
 from .answer_check import check_numbers
-from .openrouter import ProviderError, fetch_model_info
+from .openrouter import ProviderError, fetch_model_info, missing_model_settings
 from .sessions import SessionStore
 from .verifier import successful_data, verifier_model_name, verify_answer
 
@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 
 UNKNOWN_MODEL = {"name": None, "context_window": None, "price_input_per_million": None,
                  "price_output_per_million": None, "price_cache_read_per_million": None,
-                 "currency": None, "source": "unknown"}
+                 "currency": None, "source": "unknown", "context_source": None, "free": False}
 
 
 class ChatRequest(BaseModel):
@@ -153,7 +153,8 @@ def create_app(settings=None) -> FastAPI:
                 "openrouter_model": name, "price_input_per_million": None, "price_output_per_million": None}))
             if info.get("context_window") is None:
                 # Модели нет в каталоге: окно — как у агента, цены неизвестны (стоимость — только из usage.cost).
-                info = {**info, "context_window": agent_info.get("context_window")}
+                info = {**info, "context_window": agent_info.get("context_window"),
+                        "context_source": agent_info.get("context_source")}
             app.state.verifier_model_info = info
         return app.state.verifier_model_info
 
@@ -195,9 +196,7 @@ def create_app(settings=None) -> FastAPI:
 
     @app.get("/api/status")
     async def status():
-        key_name, model_name = getattr(settings, "model_setting_names", ("OPENROUTER_API_KEY", "OPENROUTER_MODEL"))
-        missing = [name for name, value in ((key_name, getattr(settings, "openrouter_api_key", "")),
-                                            (model_name, getattr(settings, "openrouter_model", ""))) if not value]
+        missing = missing_model_settings(settings)
         index = await resolved(graph.status())
         if not isinstance(index, dict):
             index = {"status": str(index)}
@@ -208,7 +207,7 @@ def create_app(settings=None) -> FastAPI:
                 "model_info": app.state.model_info,
                 "missing_settings": missing, "mcp_transport": getattr(settings, "mcp_transport", "http"),
                 "resources": await resolved(graph.resources()), "index": index,
-                "limits": {"context_budget": budget(),
+                "limits": {"context_budget": budget(), "context_window": context_window(settings, app.state.model_info),
                            "max_output_tokens": getattr(settings, "max_output_tokens", 4096),
                            "max_tool_steps": getattr(settings, "max_tool_steps", 8),
                            "max_tool_calls": getattr(settings, "max_tool_calls", 16)}}
@@ -255,9 +254,8 @@ def create_app(settings=None) -> FastAPI:
         text = body.message.strip()
         if not text:
             raise HTTPException(422, "Сообщение не может быть пустым.")
-        if not getattr(settings, "openrouter_api_key", "") or not getattr(settings, "openrouter_model", ""):
-            names = getattr(settings, "model_setting_names", ("OPENROUTER_API_KEY", "OPENROUTER_MODEL"))
-            raise HTTPException(503, f"Заполните {' и '.join(names)} в .env и перезапустите приложение.")
+        if missing := missing_model_settings(settings):
+            raise HTTPException(503, f"Заполните {' и '.join(missing)} в .env и перезапустите приложение.")
         lock = locks.setdefault(session_id, asyncio.Lock())
         if lock.locked():
             raise HTTPException(409, "В этом диалоге уже формируется ответ.")
@@ -352,9 +350,8 @@ def create_app(settings=None) -> FastAPI:
         turn = store.turn(session_id, message_id)
         if turn is None:
             raise HTTPException(404, "Ответ не найден.")
-        if not getattr(settings, "openrouter_api_key", "") or not getattr(settings, "openrouter_model", ""):
-            names = getattr(settings, "model_setting_names", ("OPENROUTER_API_KEY", "OPENROUTER_MODEL"))
-            raise HTTPException(503, f"Заполните {' и '.join(names)} в .env и перезапустите приложение.")
+        if missing := missing_model_settings(settings):
+            raise HTTPException(503, f"Заполните {' и '.join(missing)} в .env и перезапустите приложение.")
         lock = locks.get(session_id)
         if lock and lock.locked():
             raise HTTPException(409, "В этом диалоге сейчас формируется ответ. Проверьте после его завершения.")

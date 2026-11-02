@@ -1,10 +1,14 @@
-"""Учёт расхода модели: токены и стоимость одного обращения, ответа и диалога."""
+"""Учёт расхода модели: токены и стоимость одного обращения, ответа и диалога.
+
+cost — стоимость в currency (валюта может быть неизвестна — None); None, если стоимость неизвестна:
+провайдер её не прислал, а цен модели нет. free — локальная модель без цен: обращение ничего не стоит.
+"""
 
 
 def empty_usage() -> dict:
     return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "requests": 0,
             "known": True, "unknown_requests": 0, "last_input_tokens": 0,
-            "cost": 0.0, "currency": None, "cost_known": True}
+            "cost": 0.0, "currency": None, "cost_known": True, "free": False}
 
 
 def price_tokens(input_tokens: int, output_tokens: int, model_info: dict | None, cached_tokens: int = 0) -> float | None:
@@ -28,11 +32,15 @@ def request_usage(raw: dict | None, model_info: dict | None) -> dict:
     cached = int((raw.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
     # Если провайдер сам посчитал стоимость — берём её, иначе считаем по прайсу.
     cost = float(raw["cost"]) if isinstance(raw.get("cost"), (int, float)) else price_tokens(prompt, completion, model_info, cached)
+    # Локальная модель без цен ничего не стоит, даже если сервер не прислал число токенов.
+    free = cost is None and bool((model_info or {}).get("free"))
+    if free:
+        cost = 0.0
     return {"input_tokens": prompt, "output_tokens": completion,
             "total_tokens": int(raw.get("total_tokens") or prompt + completion), "requests": 1,
             "known": known, "unknown_requests": 0 if known else 1, "last_input_tokens": prompt,
-            "cost": cost if known else None, "currency": (model_info or {}).get("currency"),
-            "cost_known": known and cost is not None}
+            "cost": cost if known or free else None, "currency": (model_info or {}).get("currency"),
+            "cost_known": free or (known and cost is not None), "free": free}
 
 
 def with_cost(usage: dict, model_info: dict | None) -> dict:
@@ -51,8 +59,11 @@ def add_usage(left: dict, right: dict) -> dict:
     result["known"] = bool(left.get("known", True) and right.get("known", True))
     # Размер контекста — у самого последнего обращения.
     result["last_input_tokens"] = right.get("last_input_tokens") or left.get("last_input_tokens") or 0
-    costs = [item.get("cost") for item in (left, right) if item.get("requests")]
-    result["cost"] = sum(cost for cost in costs if cost is not None)
-    result["cost_known"] = all(item.get("cost_known", True) for item in (left, right) if item.get("requests"))
+    billed = [item for item in (left, right) if item.get("requests")]
+    costs = [item["cost"] for item in billed if item.get("cost") is not None]
+    # Ни одной известной стоимости — сумма неизвестна (None), а не 0.
+    result["cost"] = sum(costs) if costs or not billed else None
+    result["cost_known"] = all(item.get("cost_known", True) for item in billed)
+    result["free"] = bool(billed) and all(item.get("free") for item in billed)
     result["currency"] = right.get("currency") or left.get("currency")
     return result

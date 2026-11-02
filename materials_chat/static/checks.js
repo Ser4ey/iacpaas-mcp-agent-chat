@@ -3,7 +3,7 @@
  * с цитатами, ведущими к месту утверждения в ответе.
  * Только DOM-узлы и textContent, как в markdown.js, — innerHTML не используется.
  */
-import { formatCost, plural } from './format.js';
+import { formatUsageCost, plural } from './format.js';
 
 const NO_MATCH_HINT = 'Сверено с данными: {confirmed} из {checked}. '
   + 'Сюда попадают и числа, вычисленные моделью (пересчёт единиц, суммы), — это не обязательно ошибка.';
@@ -182,8 +182,8 @@ function usageLine(usage) {
   if (!usage) return '';
   const parts = [];
   if (usage.total_tokens) parts.push(plural(usage.total_tokens, ['токен', 'токена', 'токенов']));
-  const cost = formatCost(usage.cost, usage.currency);
-  if (cost) parts.push(`${usage.cost_known === false && !cost.startsWith('<') ? '≥ ' : ''}${cost}`);
+  const cost = formatUsageCost(usage);
+  if (cost) parts.push(cost);
   return parts.length ? `Проверка: ${parts.join(' · ')}` : '';
 }
 

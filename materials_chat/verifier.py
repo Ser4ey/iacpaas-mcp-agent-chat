@@ -8,7 +8,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, Field, ValidationError
 
 from .agent import context_budget
-from .openrouter import ProviderError, as_provider_error, create_chat_model
+from .openrouter import ProviderError, as_provider_error, create_chat_model, strip_thinking
 from .prompts import VERIFIER_PROMPT
 from .sessions import SessionStore
 from .usage import request_usage
@@ -78,7 +78,8 @@ def parse_report(message) -> VerdictReport:
     try:
         if message.tool_calls:
             return VerdictReport.model_validate(message.tool_calls[0]["args"])
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(message.text).strip())
+        # Локальная модель может начать ответ рассуждением <think>…</think> — JSON идёт после него.
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", strip_thinking(str(message.text)).strip())
         return VerdictReport.model_validate_json(text)
     except (ValidationError, ValueError, TypeError, KeyError):
         raise ProviderError(BAD_OUTPUT, "verifier_bad_output") from None
@@ -127,7 +128,7 @@ async def verify_answer(settings, question: str, answer: str, traces: list[dict]
             if on_claim:
                 shown = announce_claims(message, shown, on_claim)
     except Exception as error:
-        problem = as_provider_error(error, getattr(settings, "provider_name", "API модели"))
+        problem = as_provider_error(error, getattr(settings, "provider_name", "API модели"), settings)
         raise problem or error
     if message is None:
         raise ProviderError(BAD_OUTPUT, "verifier_bad_output")

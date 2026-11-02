@@ -25,7 +25,8 @@ from langchain_core.messages import (AIMessage, AIMessageChunk, HumanMessage, Sy
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from mcp import types
 
-from .openrouter import REASONING, ProviderError, as_provider_error, create_chat_model, reasoning_fragments
+from .openrouter import (REASONING, ProviderError, ThinkFilter, as_provider_error, create_chat_model,
+                         reasoning_fragments, strip_thinking)
 from .prompts import FINAL_STEP_NOTE, SYSTEM_PROMPT
 from .sessions import SessionStore
 from .usage import add_usage, empty_usage, request_usage
@@ -46,10 +47,19 @@ class TurnResult:
     interrupted: bool = False
 
 
+# Окно, если его не сообщили ни провайдер, ни LM Studio, ни MODEL_CONTEXT_TOKENS.
+DEFAULT_CONTEXT_TOKENS = 32768
+
+
+def context_window(settings, model_info: dict | None) -> int:
+    """Окно контекста модели: MODEL_CONTEXT_TOKENS, иначе из каталога провайдера, иначе по умолчанию."""
+    return (getattr(settings, "model_context_tokens", None) or (model_info or {}).get("context_window")
+            or DEFAULT_CONTEXT_TOKENS)
+
+
 def context_budget(settings, model_info: dict | None) -> int:
     """Сколько токенов истории можно отправить: окно модели минус место под ответ."""
-    window = getattr(settings, "model_context_tokens", None) or (model_info or {}).get("context_window") or 32768
-    budget = window - getattr(settings, "max_output_tokens", 4096)
+    budget = context_window(settings, model_info) - getattr(settings, "max_output_tokens", 4096)
     soft_limit = getattr(settings, "max_context_tokens", None)
     return min(budget, soft_limit) if soft_limit else budget
 
@@ -59,7 +69,7 @@ def to_dicts(messages: list) -> list[dict]:
     result = []
     for message in messages:
         if isinstance(message, AIMessage):
-            item = {"role": "assistant", "content": str(message.text)}
+            item = {"role": "assistant", "content": strip_thinking(str(message.text))}
             calls = [{"id": call["id"], "type": "function", "function": {
                 "name": call["name"], "arguments": json.dumps(call["args"], ensure_ascii=False)}}
                 for call in message.tool_calls]
@@ -283,7 +293,7 @@ class Agent:
                 except Exception as error:
                     # Поднимаем после выхода из MCP-сессии: внутри неё библиотека anyio
                     # завернула бы ошибку в ExceptionGroup и потеряла понятный текст.
-                    failure = as_provider_error(error, provider)
+                    failure = as_provider_error(error, provider, self.settings)
                     if failure is None:
                         raise
         except asyncio.CancelledError:
@@ -300,7 +310,19 @@ class Agent:
         graph = create_agent(model, tools, system_prompt=SYSTEM_PROMPT, middleware=[policy])
         # На каждый шаг — узел модели и узел инструментов, плюс финальный ответ.
         config = {"recursion_limit": 2 * policy.max_steps + 5}
-        reply_id, wrote_text = None, False
+        reply_id, wrote_text, visible = None, False, ThinkFilter()
+
+        def show(text: str) -> list[str]:
+            """Куски видимого текста ответа; рассуждения <think>…</think> в него не попадают."""
+            nonlocal wrote_text
+            if not text:
+                return []
+            pieces = ["\n\n"] if not wrote_text and result.content else []  # новый абзац после прошлого текста
+            wrote_text = True
+            pieces.append(text)
+            result.content += "".join(pieces)
+            return pieces
+
         async for mode, payload in graph.astream({"messages": messages}, config,
                                                  stream_mode=["messages", "custom", "values"]):
             if mode == "custom":            # события TurnPolicy: статус, начало и конец вызова
@@ -309,14 +331,14 @@ class Agent:
                 result.model_messages = to_dicts(complete_groups(payload["messages"][start:]))
             elif isinstance(payload[0], AIMessageChunk) and payload[0].text:
                 chunk = payload[0]           # текст ответа модели по мере генерации
+                pieces = []
                 if chunk.id != reply_id:
-                    reply_id, wrote_text = chunk.id, False
-                if not wrote_text and result.content:  # новый абзац после прошлого текста
-                    result.content += "\n\n"
-                    yield "answer_delta", {"text": "\n\n"}
-                wrote_text = True
-                result.content += chunk.text
-                yield "answer_delta", {"text": chunk.text}
+                    pieces = show(visible.flush())
+                    reply_id, wrote_text, visible = chunk.id, False, ThinkFilter()
+                for piece in pieces + show(visible.feed(chunk.text)):
+                    yield "answer_delta", {"text": piece}
+        for piece in show(visible.flush()):
+            yield "answer_delta", {"text": piece}
 
         # Ответ текстом — ход завершён.
         assistant = result.model_messages[-1]
