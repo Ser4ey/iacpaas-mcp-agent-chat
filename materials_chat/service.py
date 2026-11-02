@@ -18,10 +18,14 @@ from .composition import (RULES, ConditionError, class_names, in_class, parse_co
                           resolve_element, select_materials)
 from .config import Settings
 from .graph_store import GraphStore, subgraph_from_export
+from .ontology import ONTOLOGIES, Ontology, OntologyError
 from .platform import PlatformClient, PlatformError, concept_path, utc_now
 
 log = logging.getLogger(__name__)
 
+STRUCTURE_LEGEND = ("Дерево понятий онтологии: строка — понятие [вид], отступ — вложенность. Для create_resource: "
+                    "concept — имя понятия; у вершины — name («нужно имя» — обязательно, иначе имя = понятие); "
+                    "у значения — value указанного типа; «не поддерживается» — такие вершины создать нельзя.")
 # Самая глубокая запись марки — 7 уровней от вершины марки: любая запись читается одним вызовом.
 MAX_DEPTH = 8
 COMPOSITION_RESOURCE = "materials"
@@ -197,9 +201,15 @@ class GraphService:
         if isinstance(metadata.get("ontology"), str):
             metadata["ontology"] = self._relative_path(metadata["ontology"])
         metadata["context"] = [self._relative_path(value) for value in (metadata.get("context") or [])]
-        return ToolResult(ok=True, data={**definition.model_dump(), "metadata": metadata,
-                          "nodes": indexed["node_count"], "edges": indexed["edge_count"],
-                          "root": str(metadata.get("id", ""))}, meta=meta)
+        data = {**definition.model_dump(), "metadata": metadata, "nodes": indexed["node_count"],
+                "edges": indexed["edge_count"], "root": str(metadata.get("id", ""))}
+        if self.settings.write_enabled and resource_id in ONTOLOGIES:
+            try:
+                ontology = await asyncio.to_thread(Ontology.load, self.store, self.definitions, resource_id)
+                data.update(structure=ontology.structure(), structure_legend=STRUCTURE_LEGEND)
+            except OntologyError:
+                pass
+        return ToolResult(ok=True, data=data, meta=meta)
 
     def _bounded_node(self, node: dict) -> dict:
         result = dict(node)

@@ -216,25 +216,30 @@ class Ontology:
 
     @staticmethod
     def value(concept: Concept, raw):
-        """Значение по типу понятия: REAL — число (строка-число допустима), INTEGER — целое, STRING — строка."""
-        if raw is None or (isinstance(raw, str) and not raw.strip()):
-            raise OntologyError("INVALID_VALUE", f"У «{concept.name}» нужно значение (value, {concept.valtype}).")
-        if concept.valtype == "STRING":
-            if not isinstance(raw, str):
-                raise OntologyError("INVALID_VALUE", f"«{concept.name}»: ожидается строка (STRING).")
-            return raw.strip()
-        try:
-            if isinstance(raw, bool):
-                raise ValueError
-            number = float(raw.strip().replace(",", ".")) if isinstance(raw, str) else float(raw)
-        except (TypeError, ValueError):
-            raise OntologyError("INVALID_VALUE", f"«{concept.name}»: ожидается число ({concept.valtype}), "
-                                f"получено «{raw}».") from None
-        if concept.valtype == "INTEGER":
-            if not number.is_integer():
-                raise OntologyError("INVALID_VALUE", f"«{concept.name}»: ожидается целое число (INTEGER).")
-            return int(number)
-        return number
+        return convert_value(concept.name, concept.valtype, raw)
+
+
+def convert_value(label: str, valtype: str, raw):
+    """Значение по типу: REAL — число (строка-число допустима), INTEGER — целое, STRING — строка."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raise OntologyError("INVALID_VALUE", f"У «{label}» нужно значение (value, {valtype}).")
+    if valtype not in VALUE_TYPES:
+        raise OntologyError("UNSUPPORTED_ONTOLOGY_FEATURE", f"«{label}»: значения типа {valtype} не поддерживаются.")
+    if valtype == "STRING":
+        if not isinstance(raw, str):
+            raise OntologyError("INVALID_VALUE", f"«{label}»: ожидается строка (STRING).")
+        return raw.strip()
+    try:
+        if isinstance(raw, bool):
+            raise ValueError
+        number = float(raw.strip().replace(",", ".")) if isinstance(raw, str) else float(raw)
+    except (TypeError, ValueError):
+        raise OntologyError("INVALID_VALUE", f"«{label}»: ожидается число ({valtype}), получено «{raw}».") from None
+    if valtype == "INTEGER":
+        if not number.is_integer():
+            raise OntologyError("INVALID_VALUE", f"«{label}»: ожидается целое число (INTEGER).")
+        return int(number)
+    return number
 
 
 def node_label(node: dict) -> str:
