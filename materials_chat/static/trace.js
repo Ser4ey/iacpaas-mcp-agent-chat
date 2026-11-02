@@ -311,7 +311,8 @@ function describeArguments(name, args) {
         args.depth != null && `глубина ${args.depth}`]
         .filter(Boolean).join(', ');
     case 'count_graph':
-      return [resource, args.root].filter(Boolean).join(' / ');
+      return [[resource, args.root].filter(Boolean).join(' / '), args.concept && `понятие «${args.concept}»`]
+        .filter(Boolean).join(', ');
     case 'get_inforesource':
       return resource || (args.path ? `«${args.path}»` : '');
     case 'validate_resource':
@@ -366,6 +367,8 @@ function describeResult(name, result) {
       if (!Array.isArray(data.nodes)) return '';
       return plural(data.nodes.length, NODES) + (data.has_more ? ', есть ещё' : '');
     case 'count_graph':
+      if (typeof data.count === 'number') return `«${data.concept}»: ${data.count}`;
+      return typeof data.nodes === 'number' ? plural(data.nodes, NODES) : '';
     case 'get_inforesource':
       return typeof data.nodes === 'number' ? plural(data.nodes, NODES) : '';
     case 'list_inforesources':
