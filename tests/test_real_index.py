@@ -79,7 +79,7 @@ def ranges(copy):
                 return None if value is None else (value, value)
         return None  # «Расчетное», нет значения
 
-    result = {}
+    result, forms = {}, {}
     for node_id, (label, kind, _) in nodes.items():
         if kind != "Химический элемент":
             continue
@@ -95,6 +95,19 @@ def ranges(copy):
         if material is None or meta(material) != "Материал":
             continue
         result.setdefault(label, {}).setdefault(material, None if aggregate else interval(node_id))
+        forms.setdefault((label, material), next((meta(kid) for kid in kids.get(node_id, [])
+                                                  if meta(kid) != "%"), None) if not aggregate else None)
+    # Основа «не более X» — остаток до 100 % по верхним границам остальных элементов (если все известны).
+    for node_id, (label, kind, _) in nodes.items():
+        up = parent.get(node_id)
+        if kind != "Химический элемент" or up is None or meta(up) != "Основа":
+            continue
+        material = parent.get(parent.get(up))
+        base = result.get(label, {}).get(material)
+        others = [values[material] for symbol, values in result.items() if symbol != label and material in values]
+        if base and forms.get((label, material)) == "Не более" and others and all(others):
+            low = round(min(base[1], max(0.0, 100.0 - sum(high for _, high in others))), 4)
+            result[label][material] = (low, base[1])
     return result
 
 
@@ -193,3 +206,10 @@ def test_query_over_all_grades_is_fast(service):
     started = time.perf_counter()
     service.find_materials([{"element": "Cr", "op": ">", "value": 20}], sort_by="Cr")
     assert time.perf_counter() - started < 1
+
+
+def test_iron_above_five_percent_is_one_call_with_exact_total(service, ranges):
+    # Вопрос «сколько материалов с содержанием железа больше 5 %» — один вызов, точный total.
+    result = service.find_materials([{"element": "Fe", "op": ">", "value": 5}], limit=1)
+    expected = {key for key, value in ranges["Fe"].items() if value and value[0] > 5}
+    assert result.data["total"] == len(expected) > 1000

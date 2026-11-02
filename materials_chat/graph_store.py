@@ -6,7 +6,7 @@ from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 
-from .composition import rebuild_composition
+from .composition import rebuild_composition, state_key
 from .platform import utc_now
 
 
@@ -146,7 +146,7 @@ class GraphStore:
                 raise KeyError(resource_id)
             state = db.execute("SELECT indexed_at FROM composition_state WHERE resource_id=?",
                                (resource_id,)).fetchone()
-            if state is None or state["indexed_at"] != resource["indexed_at"]:
+            if state is None or state["indexed_at"] != state_key(resource["indexed_at"]):
                 rebuild_composition(db, resource_id, resource["indexed_at"])
             records = {}
             for row in db.execute("SELECT material_id, name, classes, base FROM composition_materials "
