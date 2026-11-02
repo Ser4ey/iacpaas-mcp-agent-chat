@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     api_timeout_seconds: float = Field(default=65, ge=30, le=180)
     max_export_bytes: int = 64 * 1024 * 1024
     auto_sync_on_start: bool = True
+    # Запись в «Мой фонд» (создание, изменение, удаление) и чтение любого ресурса по пути.
+    write_enabled: bool = True
+    # Дополнительные защищённые пути через «;» — к базовым ресурсам и папке «Загрузки».
+    protected_paths: str = ""
+    write_confirm_timeout_seconds: float = Field(default=120, ge=5, le=600)
 
     @model_validator(mode="before")
     @classmethod
