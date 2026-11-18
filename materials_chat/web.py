@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from .agent import Agent, context_budget, context_window
 from .answer_check import check_numbers
+from .config import public_endpoint
 from .openrouter import ProviderError, fetch_model_info, missing_model_settings
 from .sessions import SessionStore
 from .verifier import successful_data, verifier_model_name, verify_answer
@@ -145,12 +146,12 @@ def create_app(settings=None) -> FastAPI:
         """Окно и цены проверяющей модели; каталог другой модели запрашивается один раз, при первой проверке."""
         agent_info = await current_model_info()
         name = verifier_model_name(settings)
-        if name == settings.openrouter_model:
+        if name == settings.model_name:
             return agent_info
         if app.state.verifier_model_info is None:
             # PRICE_* в .env относятся к модели агента, не к проверяющей.
-            info = await fetch_model_info(settings.model_copy(update={
-                "openrouter_model": name, "price_input_per_million": None, "price_output_per_million": None}))
+            info = await fetch_model_info(settings.with_model(
+                name, price_input_per_million=None, price_output_per_million=None))
             if info.get("context_window") is None:
                 # Модели нет в каталоге: окно — как у агента, цены неизвестны (стоимость — только из usage.cost).
                 info = {**info, "context_window": agent_info.get("context_window"),
@@ -203,8 +204,10 @@ def create_app(settings=None) -> FastAPI:
             index = {"status": str(index)}
         index = {**index, "refresh_running": bool(refresh_task and not refresh_task.done()),
                  "refresh_error": refresh_error, "refresh_result": refresh_result}
-        return {"configured": not missing, "model": getattr(settings, "openrouter_model", ""),
+        return {"configured": not missing, "model": getattr(settings, "model_name", ""),
                 "provider": getattr(settings, "provider_name", "API модели"),
+                "endpoint": public_endpoint(getattr(settings, "model_base_url", "")),
+                "model_settings": getattr(settings, "model_settings_prefix", "ROUTERAI"),
                 "model_info": app.state.model_info,
                 "missing_settings": missing, "mcp_transport": getattr(settings, "mcp_transport", "http"),
                 "resources": await resolved(graph.resources()), "index": index,

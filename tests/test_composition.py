@@ -167,7 +167,7 @@ def make_service(tmp_path, imported=True):
         {"id": "elements", "title": "Элементы", "path": "Тест / Элементы", "kind": "information"},
     ], ensure_ascii=False), encoding="utf-8")
     result = GraphService(Settings(_env_file=None, resources_path=config, data_dir=tmp_path / "data", live_reads=False,
-                                   iacpaas_username="", iacpaas_password="", openrouter_api_key=""))
+                                   iacpaas_username="", iacpaas_password="", routerai_api_key=""))
     if imported:
         result.store.import_graph("materials", catalog())
         result.store.import_graph("elements", elements_base())

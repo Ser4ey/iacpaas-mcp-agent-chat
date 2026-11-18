@@ -49,6 +49,34 @@ export function formatUsageCost(usage, { currency, unknown = 'стоимость
   return usage.cost_known === false && !cost.startsWith('<') ? `≥\xa0${cost}` : cost;
 }
 
+/**
+ * Есть ли у расхода сумма в деньгах. Нет — у локальной модели без цен («бесплатно» ничего не говорит о расходе)
+ * и когда цен нет, а провайдер сумму не прислал. Тогда вместо стоимости показываются токены.
+ */
+export function hasMoneyCost(usage) {
+  if (!usage?.requests || usage.free) return false;
+  if (typeof usage.cost !== 'number' || !Number.isFinite(usage.cost)) return false;
+  return !(usage.cost_known === false && !(usage.cost > 0));
+}
+
+/** Токены расхода: «812 токенов», compact — «45,2 тыс. токенов»; «≥» — провайдер сообщил их не по всем обращениям. */
+export function formatTokens(usage, { compact = false } = {}) {
+  const total = usage?.total_tokens;
+  if (!total) return '';
+  const label = compact && total >= 1000 ? `${formatCompact(total)}\xa0токенов` : plural(total, ['токен', 'токена', 'токенов']);
+  return (usage.known === false ? '≥\xa0' : '') + label;
+}
+
+/**
+ * Расход одной подписью (шапка, список диалогов): сумма в деньгах, если она известна, иначе токены.
+ * Если провайдер не сообщил и токены — прежняя подпись: «бесплатно» или unknown.
+ */
+export function formatUsageSummary(usage, { currency, unknown = 'стоимость неизвестна', compact = true } = {}) {
+  if (!usage?.requests) return '';
+  if (hasMoneyCost(usage)) return formatUsageCost(usage, { currency });
+  return formatTokens(usage, { compact }) || formatUsageCost(usage, { currency, unknown });
+}
+
 /** 34 → «34 мс», 1840 → «1,8 с» */
 export function formatDuration(ms) {
   if (typeof ms !== 'number' || !Number.isFinite(ms)) return '';

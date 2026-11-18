@@ -1,9 +1,9 @@
-"""Модель для агента: ChatOpenAI из LangChain, настроенный на RouterAI, OpenRouter или локальный сервер.
+"""Модель для агента: ChatOpenAI из LangChain, настроенный на RouterAI или на свой сервер (LLM_*).
 
 Все они совместимы с Chat Completions. RouterAI и OpenRouter добавляют в ответ два поля,
 которые стандартный ChatOpenAI отбрасывает: фактическую стоимость (usage.cost) и
 рассуждения модели (reasoning_details). RouterAIChat их сохраняет. Локальный сервер
-(LM Studio, Ollama) ключа не требует, цен и окна контекста в каталоге не сообщает.
+(например, LM Studio или Ollama) ключа не требует, цен и окна контекста в каталоге не сообщает.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 # Валюта цен в каталоге моделей провайдера.
 PROVIDER_CURRENCY = {"RouterAI": "RUB", "OpenRouter": "USD"}
 REASONING = "reasoning_details"
-# Локальному серверу ключ не нужен, но клиент OpenAI без ключа не создаётся.
+# Серверу без ключа (локальному или своему) ключ не нужен, но клиент OpenAI без ключа не создаётся.
 LOCAL_API_KEY = "not-needed"
 THINK_OPEN, THINK_CLOSE = "<think>", "</think>"
 THINK_BLOCK = re.compile(r"<think>.*?(?:</think>\s*|$)", re.S)
@@ -38,14 +38,20 @@ class ProviderError(RuntimeError):
 def endpoint_is_local(settings) -> bool:
     """Модель на локальном сервере (адрес на этом компьютере или в локальной сети)."""
     value = getattr(settings, "model_is_local", None)
-    return value if isinstance(value, bool) else is_local_endpoint(getattr(settings, "openrouter_base_url", ""))
+    return value if isinstance(value, bool) else is_local_endpoint(getattr(settings, "model_base_url", ""))
+
+
+def settings_prefix(settings) -> str:
+    """LLM — своя модель, ROUTERAI — RouterAI: с этого начинаются имена настроек в подсказках."""
+    return getattr(settings, "model_settings_prefix", "ROUTERAI")
 
 
 def missing_model_settings(settings) -> list[str]:
-    """Каких настроек модели не хватает. Ключ API нужен только облачному провайдеру."""
-    key_name, model_name = getattr(settings, "model_setting_names", ("OPENROUTER_API_KEY", "OPENROUTER_MODEL"))
-    missing = [] if endpoint_is_local(settings) or getattr(settings, "openrouter_api_key", "") else [key_name]
-    return missing + ([] if getattr(settings, "openrouter_model", "") else [model_name])
+    """Каких настроек модели не хватает. Ключ обязателен только RouterAI."""
+    key_name, model_name = getattr(settings, "model_setting_names", ("ROUTERAI_API_KEY", "ROUTERAI_MODEL"))
+    required = getattr(settings, "model_key_required", not endpoint_is_local(settings))
+    missing = [key_name] if required and not getattr(settings, "model_api_key", "") else []
+    return missing + ([] if getattr(settings, "model_name", "") else [model_name])
 
 
 def _per_million(value) -> float | None:
@@ -84,11 +90,14 @@ async def fetch_model_info(settings) -> dict:
             "price_output_per_million": None, "price_cache_read_per_million": None,
             "currency": getattr(settings, "price_currency", None) or PROVIDER_CURRENCY.get(provider),
             "source": "unknown", "context_source": "default", "free": False}
-    model = getattr(settings, "openrouter_model", "")
-    base = str(getattr(settings, "openrouter_base_url", "")).rstrip("/")
+    model = getattr(settings, "model_name", "")
+    base = str(getattr(settings, "model_base_url", "")).rstrip("/")
+    key = getattr(settings, "model_api_key", "")
     if model and base:
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10)) as client:
+            # Ключ уходит только на тот же сервер, что и запросы к модели: свой сервер может закрывать им и каталог.
+            headers = {"Authorization": f"Bearer {key}"} if key else {}
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=10), headers=headers) as client:
                 response = await client.get(base + "/models")
                 response.raise_for_status()
                 entry = next((item for item in response.json().get("data", []) if item.get("id") == model), None)
@@ -209,15 +218,16 @@ class RouterAIChat(ChatOpenAI):
 
 def create_chat_model(settings, **overrides) -> RouterAIChat:
     """Модель из настроек .env. overrides — для тестов (например, свой HTTP-клиент)."""
-    key_setting, model_setting = getattr(settings, "model_setting_names", ("OPENROUTER_API_KEY", "OPENROUTER_MODEL"))
+    key_setting, model_setting = getattr(settings, "model_setting_names", ("ROUTERAI_API_KEY", "ROUTERAI_MODEL"))
     local = endpoint_is_local(settings)
-    key = getattr(settings, "openrouter_api_key", "") or (LOCAL_API_KEY if local else "")
+    required = getattr(settings, "model_key_required", not local)
+    key = getattr(settings, "model_api_key", "") or ("" if required else LOCAL_API_KEY)
     if not key:
         raise ProviderError(f"Укажите {key_setting} в .env.", "missing_api_key")
-    if not getattr(settings, "openrouter_model", ""):
+    if not getattr(settings, "model_name", ""):
         raise ProviderError(f"Укажите {model_setting} в .env.", "missing_model")
-    options = {"model": settings.openrouter_model, "api_key": key,
-               "base_url": str(getattr(settings, "openrouter_base_url", "https://openrouter.ai/api/v1")).rstrip("/"),
+    options = {"model": settings.model_name, "api_key": key,
+               "base_url": str(settings.model_base_url).rstrip("/"),
                "max_tokens": getattr(settings, "max_output_tokens", 4096),
                "stream_usage": True, "timeout": getattr(settings, "model_timeout_seconds", 120),
                # Повтор после тайм-аута локальной модели снова занял бы всё время ожидания.
@@ -242,9 +252,10 @@ def _server_message(error: openai.APIStatusError) -> str:
 
 
 def local_provider_error(error: BaseException, settings) -> ProviderError | None:
-    """Ошибки локального сервера модели — с подсказкой, что сделать, чтобы он ответил."""
-    base = str(getattr(settings, "openrouter_base_url", "")).rstrip("/")
-    model = getattr(settings, "openrouter_model", "")
+    """Ошибки локального сервера модели — с подсказкой, какую настройку проверить."""
+    base = str(getattr(settings, "model_base_url", "")).rstrip("/")
+    model = getattr(settings, "model_name", "")
+    prefix = settings_prefix(settings)
     if isinstance(error, ContextOverflowError):
         return ProviderError("Диалог не помещается в окно контекста локальной модели. Начните новый диалог "
                              "или загрузите модель с большим окном и укажите его в MODEL_CONTEXT_TOKENS.", "context_limit")
@@ -253,14 +264,12 @@ def local_provider_error(error: BaseException, settings) -> ProviderError | None
         return ProviderError(f"Локальная модель не ответила за {timeout:g} с. Увеличьте MODEL_TIMEOUT_SECONDS "
                              "или возьмите модель меньше.", "provider_timeout")
     if isinstance(error, openai.APIConnectionError):
-        return ProviderError(f"Локальный сервер модели не отвечает по адресу {base}. Запустите его "
-                             "(LM Studio: «lms server start», Ollama: «ollama serve») и повторите вопрос.",
-                             "provider_connection")
+        return ProviderError(f"Локальный сервер модели не отвечает по адресу {base}. Проверьте, что сервер "
+                             f"запущен и адрес в {prefix}_BASE_URL верный, и повторите вопрос.", "provider_connection")
     if isinstance(error, openai.APIStatusError):
         if error.status_code == 404:
-            return ProviderError(f"Модель «{model}» не найдена на локальном сервере {base}. Загрузите её "
-                                 "(LM Studio: «lms load …», Ollama: «ollama pull …») или исправьте ROUTERAI_MODEL.",
-                                 "http_404")
+            return ProviderError(f"Модель «{model}» не найдена на локальном сервере {base}. Проверьте, что модель "
+                                 f"загружена, а {prefix}_MODEL совпадает с её id в списке {base}/models.", "http_404")
         # Тело ответа локального сервера не уходит за пределы компьютера; в нём причина (например, переполнение окна).
         detail = _server_message(error)
         hint = " Возможно, запрос не помещается в окно, с которым загружена модель." if error.status_code == 400 else ""
@@ -280,15 +289,22 @@ def as_provider_error(error: BaseException, provider: str, settings=None) -> Pro
     if isinstance(error, ContextOverflowError):
         return ProviderError(f"Диалог не помещается в окно контекста модели {provider}. Начните новый диалог.",
                              "context_limit")
+    prefix = settings_prefix(settings)
+    # Адрес своей модели (LLM_BASE_URL) задаёт пользователь — при сбое связи стоит проверить и его.
+    address = f" Проверьте адрес в {prefix}_BASE_URL." if prefix == "LLM" else ""
     if isinstance(error, openai.APITimeoutError):
-        return ProviderError(f"Истекло время ожидания {provider}.", "provider_timeout")
+        return ProviderError(f"Истекло время ожидания {provider}. Если модель отвечает медленно, "
+                             "увеличьте MODEL_TIMEOUT_SECONDS.", "provider_timeout")
     if isinstance(error, openai.APIConnectionError):
-        return ProviderError(f"Не удалось связаться с {provider}.", "provider_connection")
+        return ProviderError(f"Не удалось связаться с {provider}.{address}", "provider_connection")
     if isinstance(error, openai.APIStatusError):
         # Тело ответа провайдера может повторять данные пользователя или ключ;
         # для локального интерфейса достаточно кода статуса.
-        descriptions = {401: f"Ключ {provider} отклонён.",
+        descriptions = {401: f"Ключ {provider} отклонён. Проверьте {prefix}_API_KEY в .env.",
+                        403: f"{provider} отказал в доступе (HTTP 403). Проверьте {prefix}_API_KEY в .env.",
                         402: f"Недостаточно средств на счёте {provider}.",
+                        404: f"{provider} не нашёл модель или адрес API (HTTP 404). Проверьте {prefix}_MODEL"
+                             + (f" и {prefix}_BASE_URL (обычно оканчивается на /v1)." if prefix == "LLM" else "."),
                         429: f"{provider} ограничил частоту запросов. Повторите чуть позже."}
         return ProviderError(descriptions.get(error.status_code, f"Ошибка {provider}: HTTP {error.status_code}."),
                              f"http_{error.status_code}")

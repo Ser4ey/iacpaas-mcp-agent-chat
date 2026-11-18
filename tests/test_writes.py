@@ -77,7 +77,7 @@ DECLINED = fail("CONFIRMATION_DECLINED", "Пользователь отмени�
 
 def make(tmp_path, platform=None, **settings):
     service = GraphService(Settings(_env_file=None, data_dir=tmp_path / "data", resources_path=PROJECT_ROOT / "config" / "resources.json",
-                                    iacpaas_username="", iacpaas_password="", openrouter_api_key="", **settings))
+                                    iacpaas_username="", iacpaas_password="", routerai_api_key="", **settings))
     service.store.import_graph("properties_ontology", copy.deepcopy(ONTOLOGY))
     service.client = platform or FakePlatform()
     return WriteService(service), service.client

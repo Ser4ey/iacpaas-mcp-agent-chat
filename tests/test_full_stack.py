@@ -67,8 +67,8 @@ async def stack(tmp_path, answer, platform=None, local=False, catalog=CLOUD_CATA
     settings = Settings(_env_file=None, **({
         "data_dir": tmp_path / "data", "history_path": tmp_path / "history.sqlite3", "resources_path": config,
         "mcp_port": mcp_port, "mcp_url": f"http://127.0.0.1:{mcp_port}/mcp",
-        "openrouter_api_key": "local-test-key", "openrouter_model": "local-test-model",
-        "openrouter_base_url": f"http://127.0.0.1:{provider_port}", "auto_sync_on_start": False,
+        "llm_api_key": "local-test-key", "llm_model": "local-test-model",
+        "llm_base_url": f"http://127.0.0.1:{provider_port}", "auto_sync_on_start": False,
         "iacpaas_username": "", "iacpaas_password": "", "live_reads": False, "model_local": local} | overrides))
     GraphStore(settings.data_dir / "search.sqlite3").import_graph("materials", {
         "id": 1, "name": "Каталог", "title": "Тестовая база", "type": "КОРЕНЬ", "json_type": "universal",
@@ -277,7 +277,7 @@ def search_then_answer(text):
 @pytest.mark.asyncio
 async def test_local_model_without_key_prices_and_window_answers_for_free(tmp_path):
     answer = search_then_answer("<think>Пользователь спрашивает о сплаве.</think>\n\nНайден Тестовыйсплав.")
-    async with stack(tmp_path, answer, local=None, catalog=LOCAL_CATALOG, openrouter_api_key="") as (client, requests):
+    async with stack(tmp_path, answer, local=None, catalog=LOCAL_CATALOG, llm_api_key="") as (client, requests):
         status = await loaded_status(client)
         assert status["configured"] is True and status["missing_settings"] == []
         assert status["provider"] == "Локальная модель"
@@ -315,7 +315,8 @@ async def test_local_model_without_key_prices_and_window_answers_for_free(tmp_pa
 async def test_cloud_model_without_prices_has_unknown_cost_not_zero(tmp_path):
     async with stack(tmp_path, search_then_answer("Найден Тестовыйсплав."), catalog=LOCAL_CATALOG) as (client, _):
         status = await loaded_status(client)
-        assert status["provider"] == "API модели" and status["model_info"]["free"] is False
+        assert status["provider"] == "127.0.0.1" and status["model_info"]["free"] is False
+        assert status["model_settings"] == "LLM" and status["endpoint"].startswith("http://127.0.0.1:")
         session = (await client.post("/api/sessions")).json()
         events = parse_events((await client.post(f"/api/sessions/{session['id']}/chat",
                                                  json={"message": "Найди тестовый материал"})).text)
@@ -328,8 +329,8 @@ async def test_cloud_model_without_prices_has_unknown_cost_not_zero(tmp_path):
 
 @pytest.mark.asyncio
 async def test_stopped_local_server_gets_a_clear_message(tmp_path):
-    async with stack(tmp_path, search_then_answer("—"), local=None, openrouter_api_key="",
-                     openrouter_base_url=f"http://127.0.0.1:{free_port()}/v1") as (client, _):
+    async with stack(tmp_path, search_then_answer("—"), local=None, llm_api_key="",
+                     llm_base_url=f"http://127.0.0.1:{free_port()}/v1") as (client, _):
         session = (await client.post("/api/sessions")).json()
         events = parse_events((await client.post(f"/api/sessions/{session['id']}/chat", json={"message": "Вопрос"})).text)
         error = next(payload for name, payload in events if name == "error")

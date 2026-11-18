@@ -27,7 +27,7 @@ def copy(tmp_path_factory):
 @pytest.fixture(scope="module")
 def service(copy):
     return GraphService(Settings(_env_file=None, data_dir=copy, resources_path=PROJECT_ROOT / "config" / "resources.json",
-                                 live_reads=False, iacpaas_username="", iacpaas_password="", openrouter_api_key=""))
+                                 live_reads=False, iacpaas_username="", iacpaas_password="", routerai_api_key=""))
 
 
 @pytest.fixture(scope="module")

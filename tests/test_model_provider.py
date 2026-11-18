@@ -1,4 +1,4 @@
-"""RouterAI и локальная модель: имена настроек, модель LangChain, каталог, ошибки; платных запросов нет."""
+"""RouterAI и своя модель (LLM_*): имена настроек, модель LangChain, каталог, ошибки; платных запросов нет."""
 import json
 
 import httpx
@@ -7,7 +7,7 @@ import openai
 import pytest
 from langchain_core.exceptions import ContextOverflowError
 
-from materials_chat.config import Settings
+from materials_chat.config import Settings, public_endpoint
 from materials_chat.agent import context_window
 from materials_chat.openrouter import (ProviderError, ThinkFilter, as_provider_error, create_chat_model,
                                        fetch_model_info, missing_model_settings, strip_thinking)
@@ -18,23 +18,109 @@ def test_routerai_env_names_are_loaded_without_disclosing_key(tmp_path):
     env = tmp_path / ".env"
     env.write_text("ROUTERAI_API_KEY=local-test\nROUTERAI_MODEL=deepseek/deepseek-v4.1-flash\nROUTERAI_BASEURL=https://routerai.ru/api/v1\n", encoding="utf-8")
     settings = Settings(_env_file=env)
-    assert settings.openrouter_api_key == "local-test"
-    assert settings.openrouter_model == "deepseek/deepseek-v4.1-flash"
-    assert settings.openrouter_base_url == "https://routerai.ru/api/v1"
+    assert settings.model_settings_prefix == "ROUTERAI"
+    assert settings.model_api_key == "local-test"
+    assert settings.model_name == "deepseek/deepseek-v4.1-flash"
+    assert settings.model_base_url == "https://routerai.ru/api/v1"
     assert settings.provider_name == "RouterAI"
     assert settings.model_setting_names == ("ROUTERAI_API_KEY", "ROUTERAI_MODEL")
     assert "local-test" not in repr(settings)
 
 
-def test_routerai_key_defaults_to_routerai_endpoint():
-    settings = Settings(_env_file=None, ROUTERAI_API_KEY="local-test")
-    assert settings.openrouter_base_url == "https://routerai.ru/api/v1"
+def test_routerai_address_is_built_in():
+    settings = Settings(_env_file=None, ROUTERAI_API_KEY="local-test", ROUTERAI_MODEL="m")
+    assert settings.model_base_url == "https://routerai.ru/api/v1"
+    # Пустой ROUTERAI_BASE_URL в .env не ломает адрес.
+    assert Settings(_env_file=None, ROUTERAI_BASE_URL="").model_base_url == "https://routerai.ru/api/v1"
 
 
-def test_legacy_openrouter_config_stays_compatible():
-    settings = Settings(_env_file=None, openrouter_api_key="legacy-test", openrouter_model="legacy-model")
-    assert settings.openrouter_api_key == "legacy-test"
-    assert settings.provider_name == "OpenRouter"
+def test_empty_settings_ask_for_routerai_and_name_both_blocks():
+    settings = Settings(_env_file=None)
+    assert settings.model_settings_prefix == "ROUTERAI"
+    assert missing_model_settings(settings) == ["ROUTERAI_API_KEY", "ROUTERAI_MODEL"]
+
+
+def test_own_model_block_wins_over_routerai(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("LLM_BASE_URL=https://llm.example.com/v1/\nLLM_MODEL=corp-model\nLLM_API_KEY=own-test\n"
+                   "ROUTERAI_API_KEY=router-test\nROUTERAI_MODEL=deepseek/deepseek-v4.1-flash\n", encoding="utf-8")
+    settings = Settings(_env_file=env)
+    assert settings.model_settings_prefix == "LLM"
+    assert settings.model_base_url == "https://llm.example.com/v1"
+    assert settings.model_name == "corp-model" and settings.model_api_key == "own-test"
+    assert settings.model_setting_names == ("LLM_API_KEY", "LLM_MODEL")
+    assert settings.provider_name == "llm.example.com" and not settings.model_is_local
+    assert "own-test" not in repr(settings) and "router-test" not in repr(settings)
+    # Проверяющему с другой моделью меняется модель своего блока, адрес остаётся тем же.
+    other = settings.with_model("other-model")
+    assert other.model_name == "other-model" and other.model_base_url == "https://llm.example.com/v1"
+    assert settings.model_name == "corp-model"
+
+
+def test_own_model_needs_only_its_name():
+    # Ключ своему серверу не обязателен: если он нужен, сервер ответит 401, и сообщение назовёт LLM_API_KEY.
+    remote = Settings(_env_file=None, LLM_BASE_URL="https://llm.example.com/v1", LLM_MODEL="m")
+    assert missing_model_settings(remote) == []
+    assert missing_model_settings(Settings(_env_file=None, LLM_BASE_URL="https://llm.example.com/v1")) == ["LLM_MODEL"]
+
+
+def test_public_endpoint_hides_credentials_and_query():
+    assert public_endpoint("https://user:secret@llm.example.com:8443/v1/?token=x") == "https://llm.example.com:8443/v1"
+    assert public_endpoint("http://[::1]:1234/v1") == "http://[::1]:1234/v1"
+    assert public_endpoint("") == ""
+
+
+@pytest.mark.asyncio
+async def test_own_remote_model_gets_its_key_and_errors_name_llm_settings(monkeypatch):
+    seen = []
+
+    def handle(request):
+        seen.append(request)
+        return httpx2.Response(401, json={"error": {"message": "invalid key"}})
+
+    settings = Settings(_env_file=None, LLM_BASE_URL="https://llm.example.com/v1", LLM_MODEL="corp-model",
+                        LLM_API_KEY="own-test", ROUTERAI_API_KEY="router-test")
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
+    with pytest.raises(openai.AuthenticationError) as error:
+        await create_chat_model(settings, http_async_client=client, max_retries=0).ainvoke("Вопрос")
+    assert str(seen[0].url) == "https://llm.example.com/v1/chat/completions"
+    assert seen[0].headers["Authorization"] == "Bearer own-test"  # ключ RouterAI своему серверу не уходит
+    problem = as_provider_error(error.value, settings.provider_name, settings)
+    assert str(problem) == "Ключ llm.example.com отклонён. Проверьте LLM_API_KEY в .env."
+    not_found = as_provider_error(openai.NotFoundError("nf", response=httpx.Response(
+        404, request=httpx.Request("POST", "https://llm.example.com/v1/chat/completions")), body=None),
+        settings.provider_name, settings)
+    assert "LLM_MODEL" in str(not_found) and "LLM_BASE_URL" in str(not_found)
+
+    # Каталог своего сервера запрашивается с тем же ключом: сервер может закрывать им и /models.
+    catalog_requests = []
+    actual_client = httpx.AsyncClient
+
+    def catalog(request):
+        catalog_requests.append(request)
+        return httpx.Response(200, json={"data": [{"id": "corp-model", "context_length": 131072}]})
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: actual_client(transport=httpx.MockTransport(catalog), **kwargs))
+    info = await fetch_model_info(settings)
+    assert info["context_window"] == 131072 and info["free"] is False
+    assert str(catalog_requests[0].url) == "https://llm.example.com/v1/models"
+    assert catalog_requests[0].headers["Authorization"] == "Bearer own-test"
+
+
+@pytest.mark.asyncio
+async def test_own_model_without_key_sends_a_stub():
+    seen = []
+
+    def handle(request):
+        seen.append(request)
+        payload = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                   "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Да"}, "finish_reason": "stop"}]}
+        return httpx2.Response(200, text="data: " + json.dumps(payload) + "\n\ndata: [DONE]\n\n",
+                               headers={"Content-Type": "text/event-stream"})
+
+    settings = Settings(_env_file=None, LLM_BASE_URL="https://llm.example.com/v1", LLM_MODEL="m")
+    model = create_chat_model(settings, http_async_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handle)))
+    assert "".join([chunk.text async for chunk in model.astream("Вопрос")]) == "Да"
+    assert seen[0].headers["Authorization"] == "Bearer not-needed"
 
 
 @pytest.mark.asyncio
@@ -70,8 +156,8 @@ async def test_routerai_error_names_current_provider_not_previous_one():
     client = httpx2.AsyncClient(transport=httpx2.MockTransport(lambda _: httpx2.Response(401, json={"error": {}})))
     with pytest.raises(openai.AuthenticationError) as error:
         await create_chat_model(settings, http_async_client=client, max_retries=0).ainvoke("Вопрос")
-    problem = as_provider_error(error.value, settings.provider_name)
-    assert str(problem) == "Ключ RouterAI отклонён." and problem.code == "http_401"
+    problem = as_provider_error(error.value, settings.provider_name, settings)
+    assert str(problem) == "Ключ RouterAI отклонён. Проверьте ROUTERAI_API_KEY в .env." and problem.code == "http_401"
 
 
 def test_missing_key_is_named_in_the_error():
@@ -118,9 +204,9 @@ def test_context_overflow_reported_by_provider_has_its_own_code():
     assert problem.code == "context_limit" and "окно контекста" in str(problem)
 
 
-# ---------- Локальная модель (LM Studio, Ollama): без ключа, без цен, своё окно ----------
+# ---------- Локальная модель (например, LM Studio, Ollama): без ключа, без цен, своё окно ----------
 
-LOCAL = {"ROUTERAI_BASE_URL": "http://127.0.0.1:1234/v1", "ROUTERAI_MODEL": "qwen3-4b", "ROUTERAI_API_KEY": ""}
+LOCAL = {"LLM_BASE_URL": "http://127.0.0.1:1234/v1", "LLM_MODEL": "qwen3-4b"}
 
 
 @pytest.mark.parametrize("url, local", [
@@ -129,17 +215,24 @@ LOCAL = {"ROUTERAI_BASE_URL": "http://127.0.0.1:1234/v1", "ROUTERAI_MODEL": "qwe
     ("http://ollama:11434/v1", True), ("https://routerai.ru/api/v1", False), ("https://openrouter.ai/api/v1", False),
     ("https://api.example.com/v1", False)])
 def test_local_endpoint_is_recognized_by_address(url, local):
-    settings = Settings(_env_file=None, ROUTERAI_BASE_URL=url, ROUTERAI_MODEL="m")
+    settings = Settings(_env_file=None, LLM_BASE_URL=url, LLM_MODEL="m")
     assert settings.model_is_local is local
     assert (settings.provider_name == "Локальная модель") is local
-    # Ключ нужен только облачному провайдеру.
-    assert missing_model_settings(settings) == ([] if local else [settings.model_setting_names[0]])
+    assert missing_model_settings(settings) == []
+
+
+def test_old_env_with_local_server_in_routerai_block_still_works():
+    # .env, заполненный до появления LLM_*: локальный адрес в ROUTERAI_BASE_URL, ключ не нужен.
+    settings = Settings(_env_file=None, ROUTERAI_BASE_URL="http://127.0.0.1:1234/v1", ROUTERAI_MODEL="qwen3-4b")
+    assert settings.model_is_local and missing_model_settings(settings) == []
+    # С адресом RouterAI ключ по-прежнему обязателен.
+    assert missing_model_settings(Settings(_env_file=None, ROUTERAI_MODEL="m")) == ["ROUTERAI_API_KEY"]
 
 
 def test_model_local_setting_overrides_the_address():
-    assert Settings(_env_file=None, ROUTERAI_BASE_URL="https://llm.example.com/v1", MODEL_LOCAL="true").model_is_local
-    forced = Settings(_env_file=None, ROUTERAI_BASE_URL="http://127.0.0.1:8080/v1", MODEL_LOCAL="false")
-    assert not forced.model_is_local and forced.provider_name == "API модели"
+    assert Settings(_env_file=None, LLM_BASE_URL="https://llm.example.com/v1", MODEL_LOCAL="true").model_is_local
+    forced = Settings(_env_file=None, LLM_BASE_URL="http://127.0.0.1:8080/v1", MODEL_LOCAL="false")
+    assert not forced.model_is_local and forced.provider_name == "127.0.0.1"
 
 
 @pytest.mark.asyncio
@@ -226,10 +319,10 @@ async def test_local_server_errors_say_what_to_do():
     problem = await failure(refuse)
     assert problem.code == "provider_connection"
     assert "Локальный сервер модели не отвечает по адресу http://127.0.0.1:1234/v1" in str(problem)
-    assert "lms server start" in str(problem)
+    assert "LLM_BASE_URL" in str(problem)
 
     problem = await failure(lambda _: httpx2.Response(404, json={"error": "Model not found"}))
-    assert problem.code == "http_404" and "«qwen3-4b» не найдена" in str(problem)
+    assert problem.code == "http_404" and "«qwen3-4b» не найдена" in str(problem) and "LLM_MODEL" in str(problem)
 
     overflow = {"error": "Trying to keep the first 9000 tokens when context the overflows. However, the model is "
                          "loaded with context length of only 4096 tokens"}

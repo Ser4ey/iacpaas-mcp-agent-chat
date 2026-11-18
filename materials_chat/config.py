@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CLOUD_PROVIDERS = {"routerai.ru": "RouterAI", "openrouter.ai": "OpenRouter"}
 LOCAL_PROVIDER = "Локальная модель"
+ROUTERAI_BASE_URL = "https://routerai.ru/api/v1"
 
 
 def is_local_endpoint(base_url: str) -> bool:
@@ -30,6 +31,19 @@ def is_local_endpoint(base_url: str) -> bool:
     return address.is_loopback or address.is_private or address.is_link_local
 
 
+def public_endpoint(base_url: str) -> str:
+    """Адрес сервера модели для показа: без логина, пароля и параметров запроса, которые могут быть в URL."""
+    parts = urlsplit(str(base_url or ""))
+    if not parts.hostname:
+        return ""
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    try:
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        port = ""
+    return f"{parts.scheme}://{host}{port}{parts.path}".rstrip("/")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", env_file_encoding="utf-8-sig", extra="ignore", populate_by_name=True)
 
@@ -38,15 +52,19 @@ class Settings(BaseSettings):
     iacpaas_password: str = Field(default="", repr=False)
     iacpaas_api_key: str = Field(default="", repr=False)
     iacpaas_access_token: str = Field(default="", repr=False)
-    # Внутренние имена оставлены для совместимости с первой версией.
-    # При наличии обоих наборов настроек ROUTERAI_* имеет приоритет.
-    openrouter_api_key: str = Field(default="", repr=False,
-        validation_alias=AliasChoices("ROUTERAI_API_KEY", "OPENROUTER_API_KEY"))
-    openrouter_model: str = Field(default="",
-        validation_alias=AliasChoices("ROUTERAI_MODEL", "OPENROUTER_MODEL"))
-    openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1",
-        validation_alias=AliasChoices("ROUTERAI_BASE_URL", "ROUTERAI_BASEURL", "OPENROUTER_BASE_URL"))
-    # Локальный ли сервер модели (ключ не нужен, оплаты нет). Пусто — по адресу, см. is_local_endpoint.
+    # Модель задаётся одним из двух блоков. Своя модель (LLM_*) — любой сервер с OpenAI-совместимым
+    # API: если LLM_BASE_URL заполнен, работает она. Иначе — RouterAI (ROUTERAI_*).
+    # Код читает выбранный блок через свойства model_base_url, model_name и model_api_key.
+    llm_base_url: str = ""
+    llm_model: str = ""
+    llm_api_key: str = Field(default="", repr=False)
+    routerai_api_key: str = Field(default="", repr=False,
+        validation_alias=AliasChoices("ROUTERAI_API_KEY", "routerai_api_key"))
+    routerai_model: str = Field(default="", validation_alias=AliasChoices("ROUTERAI_MODEL", "routerai_model"))
+    # Адрес RouterAI постоянный; переменная оставлена, чтобы не ломать уже заполненные .env.
+    routerai_base_url: str = Field(default=ROUTERAI_BASE_URL,
+        validation_alias=AliasChoices("ROUTERAI_BASE_URL", "ROUTERAI_BASEURL", "routerai_base_url"))
+    # Локальный ли сервер модели (оплаты нет, без повтора после тайм-аута). Пусто — по адресу, см. is_local_endpoint.
     model_local: bool | None = None
     # Модель проверки ответа; пусто — та же, что у агента.
     verifier_model: str = Field(default="", validation_alias=AliasChoices("VERIFIER_MODEL", "verifier_model"))
@@ -92,29 +110,49 @@ class Settings(BaseSettings):
     protected_paths: str = ""
     write_confirm_timeout_seconds: float = Field(default=120, ge=5, le=600)
 
-    @model_validator(mode="before")
-    @classmethod
-    def choose_routerai_endpoint(cls, values):
-        # Ключ RouterAI без явно заданного адреса отправляем только в RouterAI.
-        # У старых настроек OPENROUTER_* сохраняется прежний адрес по умолчанию.
-        if isinstance(values, dict) and values.get("ROUTERAI_API_KEY") and not any(
-            values.get(name) for name in ("ROUTERAI_BASE_URL", "ROUTERAI_BASEURL", "OPENROUTER_BASE_URL", "openrouter_base_url")
-        ):
-            values["ROUTERAI_BASE_URL"] = "https://routerai.ru/api/v1"
-        return values
+    @property
+    def model_settings_prefix(self) -> str:
+        """Блок настроек, из которого взята модель: LLM (своя модель) или ROUTERAI."""
+        return "LLM" if self.llm_base_url.strip() else "ROUTERAI"
+
+    @property
+    def model_base_url(self) -> str:
+        own = self.model_settings_prefix == "LLM"
+        return ((self.llm_base_url if own else self.routerai_base_url).strip() or ROUTERAI_BASE_URL).rstrip("/")
+
+    @property
+    def model_name(self) -> str:
+        return (self.llm_model if self.model_settings_prefix == "LLM" else self.routerai_model).strip()
+
+    @property
+    def model_api_key(self) -> str:
+        return (self.llm_api_key if self.model_settings_prefix == "LLM" else self.routerai_api_key).strip()
+
+    @property
+    def model_key_required(self) -> bool:
+        """Ключ обязателен только RouterAI. Своей модели он нужен, если его требует сам сервер."""
+        return self.model_settings_prefix == "ROUTERAI" and not self.model_is_local
+
+    def with_model(self, name: str, **changes) -> "Settings":
+        """Те же настройки с другой моделью на том же сервере (например, для проверяющего)."""
+        field = "llm_model" if self.model_settings_prefix == "LLM" else "routerai_model"
+        return self.model_copy(update={field: name, **changes})
 
     @property
     def model_is_local(self) -> bool:
-        return self.model_local if self.model_local is not None else is_local_endpoint(self.openrouter_base_url)
+        return self.model_local if self.model_local is not None else is_local_endpoint(self.model_base_url)
 
     @property
     def provider_name(self) -> str:
-        host = (urlsplit(self.openrouter_base_url).hostname or "").lower()
-        return LOCAL_PROVIDER if self.model_is_local else CLOUD_PROVIDERS.get(host, "API модели")
+        """Имя сервера модели в интерфейсе и сообщениях: RouterAI, OpenRouter, «Локальная модель» или адрес сервера."""
+        if self.model_is_local:
+            return LOCAL_PROVIDER
+        host = (urlsplit(self.model_base_url).hostname or "").lower()
+        return CLOUD_PROVIDERS.get(host) or host or "API модели"
 
     @property
     def model_setting_names(self) -> tuple[str, str]:
-        prefix = "ROUTERAI" if self.provider_name in ("RouterAI", LOCAL_PROVIDER) else "OPENROUTER"
+        prefix = self.model_settings_prefix
         return prefix + "_API_KEY", prefix + "_MODEL"
 
     @model_validator(mode="after")

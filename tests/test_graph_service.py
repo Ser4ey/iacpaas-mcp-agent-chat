@@ -38,7 +38,7 @@ def make_service(tmp_path, live_reads=False):
     # _env_file=None обязателен: тест не должен подхватывать рабочий .env.
     settings = Settings(_env_file=None, resources_path=config, data_dir=tmp_path / "data",
                         iacpaas_username="", iacpaas_password="", iacpaas_api_key="",
-                        iacpaas_access_token="", openrouter_api_key="", live_reads=live_reads)
+                        iacpaas_access_token="", routerai_api_key="", live_reads=live_reads)
     result = GraphService(settings)
     result.store.import_graph("materials", graph_with_shared_cycle())
     return result
@@ -473,7 +473,7 @@ def test_web_start_checks_dates_in_background_without_delaying_start(tmp_path):
     service = indexed_service(tmp_path)
     settings = service.settings.model_copy(update={
         "auto_sync_on_start": True, "history_path": tmp_path / "history.sqlite3",
-        "openrouter_model": "fake", "openrouter_base_url": "http://127.0.0.1:9"})
+        "routerai_model": "fake", "routerai_base_url": "http://127.0.0.1:9"})
     app = create_app(settings)
     gate = threading.Event()
     app.state.graph.client = DatedPlatform({"Тест / Материалы": "01.01.2026", "Тест / Другая база": "01.01.2026"},

@@ -37,7 +37,7 @@ SOURCE_KEYS = ("resource_id", "resource_title", "served_from", "indexed_at", "fe
 
 def verifier_model_name(settings) -> str:
     """Модель проверки; если не задана отдельно — та же, что у агента."""
-    return getattr(settings, "verifier_model", "") or settings.openrouter_model
+    return getattr(settings, "verifier_model", "") or settings.model_name
 
 
 def summarize(claims: list[Claim]) -> dict:
