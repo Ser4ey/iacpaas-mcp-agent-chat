@@ -17,7 +17,7 @@ CREATE = {"request": {"operation": "create_folder", "parent_path": "Демо а�
 
 def server(tmp_path, **settings):
     mcp = create_server(Settings(_env_file=None, data_dir=tmp_path / "data", resources_path=PROJECT_ROOT / "config" / "resources.json",
-                                 iacpaas_username="", iacpaas_password="", openrouter_api_key="", **settings))
+                                 iacpaas_username="", iacpaas_password="", routerai_api_key="", **settings))
     platform = FakePlatform()
     mcp.graph_service.client = platform
     mcp.graph_service.store.import_graph("properties_ontology", copy.deepcopy(ONTOLOGY))

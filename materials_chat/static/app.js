@@ -14,7 +14,8 @@
 import { api, decideConfirmation, streamChat, streamVerify } from './api.js';
 import { renderContextView } from './context-view.js';
 import { renderDataView, renderIndexStatus } from './data-view.js';
-import { formatCompact, formatCost, formatNumber, formatShortDate, formatUsageCost, plural } from './format.js';
+import { formatCompact, formatCost, formatNumber, formatShortDate, formatUsageCost, formatUsageSummary, hasMoneyCost,
+  plural } from './format.js';
 import { formatElapsed, highlightNumbers, numberCheckNode, progressNode, verdictNode } from './checks.js';
 import { renderMarkdown } from './markdown.js';
 import { ToolLog, normalizeTrace, toolActivity } from './trace.js';
@@ -162,9 +163,11 @@ function renderNotices() {
   setup.hidden = Boolean(status.configured);
   if (!status.configured) {
     const missing = status.missing_settings?.length ? status.missing_settings.join(', ') : 'ключ API и модель';
+    const ownModel = status.model_settings === 'LLM' ? ''
+      : ' Чтобы вместо RouterAI подключить свою модель, заполните LLM_BASE_URL и LLM_MODEL.';
     setup.replaceChildren(
       el('strong', '', 'Модель не настроена.'),
-      ` Укажите ${missing} в файле .env и перезапустите приложение. Ключ остаётся на сервере.`,
+      ` Укажите ${missing} в файле .env и перезапустите приложение.${ownModel} Ключ остаётся на сервере.`,
     );
   }
 
@@ -211,14 +214,19 @@ function renderMeter() {
   }
 
   const usage = session?.usage ?? {};
-  const cost = formatUsageCost(usage, { currency: info.currency, unknown: '—' });
+  // Сумма в деньгах, если она известна; у локальной модели и модели без цен — токены диалога.
+  const summary = formatUsageSummary(usage, { currency: info.currency, unknown: '—' });
   const costNode = $('meter-cost');
-  costNode.hidden = !cost;
-  if (cost) {
-    costNode.replaceChildren(el('span', 'meter-label', 'диалог '), cost);
-    costNode.title = usage.free ? 'Локальная модель: за токены никто не платит'
-      : cost === '—' ? 'Стоимость диалога неизвестна: провайдер её не сообщил, а цен модели нет (их можно задать в .env, PRICE_*)'
-        : 'Стоимость всех ответов в этом диалоге';
+  costNode.hidden = !summary;
+  if (summary) {
+    costNode.replaceChildren(el('span', 'meter-label', 'диалог '), summary);
+    const tokens = `Токены всех ответов этого диалога: вход ${formatNumber(usage.input_tokens ?? 0)}, `
+      + `выход ${formatNumber(usage.output_tokens ?? 0)}.`;
+    costNode.title = hasMoneyCost(usage) ? 'Стоимость всех ответов в этом диалоге'
+      : !usage.total_tokens ? (usage.free ? 'Локальная модель: за токены никто не платит'
+        : 'Стоимость диалога неизвестна: провайдер её не сообщил, а цен модели нет (их можно задать в .env, PRICE_*)')
+        : usage.free ? `${tokens} Локальная модель: цен нет, поэтому вместо стоимости показаны токены.`
+          : `${tokens} Стоимость неизвестна: провайдер её не сообщил, а цен модели нет (их можно задать в .env, PRICE_*).`;
   }
 }
 
@@ -245,14 +253,18 @@ function shortModelName(name) {
 function describeModel(status) {
   const info = status.model_info ?? {};
   const lines = [[status.provider, status.model].filter(Boolean).join(' · ')];
+  if (status.endpoint) {
+    const source = status.model_settings === 'LLM' ? 'своя модель, настройки LLM_*' : 'настройки ROUTERAI_*';
+    lines.push(`Сервер: ${status.endpoint} (${source})`);
+  }
   const prices = [info.price_input_per_million, info.price_output_per_million];
   if (prices.every((price) => typeof price === 'number')) {
     const [input, output] = prices.map((price) => formatCost(price, info.currency));
     lines.push(`1 млн токенов: вход ${input}, выход ${output}`);
   } else if (info.free) {
-    lines.push('Бесплатно: модель работает на локальном сервере');
+    lines.push('Локальная модель без цен: вместо стоимости показаны токены');
   } else {
-    lines.push('Цены модели неизвестны: стоимость видна, только если её пришлёт провайдер');
+    lines.push('Цены модели неизвестны: стоимость видна, только если её пришлёт провайдер, иначе показаны токены');
   }
   const window = windowLine(status);
   if (window) lines.push(window);
@@ -325,7 +337,7 @@ function sessionRow(session) {
   open.title = title;
   open.disabled = state.streaming;
   if (active) open.setAttribute('aria-current', 'true');
-  const cost = formatUsageCost(session.usage);
+  const cost = formatUsageSummary(session.usage);
   const meta = [formatShortDate(session.updated_at), cost].filter(Boolean).join(' · ');
   open.append(el('span', 'session-title', title), el('span', 'session-meta', meta));
   open.addEventListener('click', () => openSession(session.id).catch(showError));
@@ -484,8 +496,10 @@ function renderAnswerMeta(view) {
       + (usage.requests ? `; обращений к модели: ${usage.requests}` : '');
     parts.push(tokens);
   }
-  // Ответ остановлен до обращения к модели — стоимости нет, её не показываем.
-  const cost = formatUsageCost(usage, { currency: state.status?.model_info?.currency });
+  // Ответ остановлен до обращения к модели — стоимости нет, её не показываем. Без цен (локальная модель,
+  // сервер без каталога цен) сумма ничего не говорит: хватает токенов слева.
+  const cost = hasMoneyCost(usage) || !usage.total_tokens
+    ? formatUsageCost(usage, { currency: state.status?.model_info?.currency }) : '';
   if (cost) parts.push(el('span', '', cost));
   if (view.grounded === false) parts.push(el('span', '', 'без обращения к базе'));
   if (view.truncated) parts.push(el('span', '', 'ответ обрезан по лимиту длины'));

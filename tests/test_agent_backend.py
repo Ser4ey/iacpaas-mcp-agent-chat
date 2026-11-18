@@ -22,8 +22,8 @@ PRICES = {"price_input_per_million": 5.0, "price_output_per_million": 10.0,
 def settings(**overrides):
     return SimpleNamespace(**({"max_context_tokens": None, "model_context_tokens": None,
                               "max_output_tokens": 1800, "max_tool_steps": 4, "max_tool_calls": 8,
-                              "openrouter_api_key": "local-test", "openrouter_model": "local-model",
-                              "openrouter_base_url": "http://provider.test/v1", "provider_name": "RouterAI"}
+                              "model_api_key": "local-test", "model_name": "local-model",
+                              "model_base_url": "http://provider.test/v1", "provider_name": "RouterAI"}
                              | overrides))
 
 
@@ -451,12 +451,12 @@ def test_web_status_and_sessions_work_without_model_key(tmp_path):
     from materials_chat.web import create_app
 
     config = Settings(_env_file=None, data_dir=tmp_path, history_path=tmp_path / "history.sqlite3",
-                      auto_sync_on_start=False, openrouter_api_key="", openrouter_model="")
+                      auto_sync_on_start=False, routerai_api_key="", routerai_model="")
     app = create_app(config)
     with TestClient(app) as client:
         status = client.get("/api/status").json()
         assert status["configured"] is False
-        assert "OPENROUTER_API_KEY" in status["missing_settings"]
+        assert "ROUTERAI_API_KEY" in status["missing_settings"]
         assert status["model_info"]["source"] == "unknown"
         assert status["limits"]["context_budget"] > 0
         assert "iacpaas_password" not in json.dumps(status)
@@ -496,8 +496,8 @@ def test_web_stream_saves_trace_grounding_and_hides_internal_reasoning(tmp_path)
 
     # Адрес провайдера недоступен: тест не должен ходить в сеть за каталогом моделей.
     config = Settings(_env_file=None, data_dir=tmp_path, history_path=tmp_path / "history.sqlite3",
-                      auto_sync_on_start=False, openrouter_api_key="test-fake-never-sent", openrouter_model="fake",
-                      openrouter_base_url="http://127.0.0.1:9")
+                      auto_sync_on_start=False, routerai_api_key="test-fake-never-sent", routerai_model="fake",
+                      routerai_base_url="http://127.0.0.1:9")
     app = create_app(config)
     app.state.agent_factory = FakeAgent
     with TestClient(app) as client:
@@ -521,8 +521,8 @@ def make_app(tmp_path, **overrides):
     from materials_chat.web import create_app
     # Адрес провайдера недоступен: тест не ходит в сеть за каталогом моделей.
     return create_app(Settings(_env_file=None, data_dir=tmp_path, history_path=tmp_path / "history.sqlite3",
-                               auto_sync_on_start=False, openrouter_api_key="test-fake-never-sent",
-                               openrouter_model="fake", openrouter_base_url="http://127.0.0.1:9", **overrides))
+                               auto_sync_on_start=False, routerai_api_key="test-fake-never-sent",
+                               routerai_model="fake", routerai_base_url="http://127.0.0.1:9", **overrides))
 
 
 def scripted_agent(turns):
@@ -668,9 +668,9 @@ def test_separate_verifier_model_gets_its_own_catalog_entry(tmp_path, monkeypatc
     asked = []
 
     async def fetch_model_info(config):
-        asked.append(config.openrouter_model)
-        entry = catalog.get(config.openrouter_model) if listed or config.openrouter_model == "fake" else None
-        found = {"name": config.openrouter_model, "source": "provider", **entry} if entry else {}
+        asked.append(config.model_name)
+        entry = catalog.get(config.model_name) if listed or config.model_name == "fake" else None
+        found = {"name": config.model_name, "source": "provider", **entry} if entry else {}
         return {"name": None, "context_window": None, "price_input_per_million": None,
                 "price_output_per_million": None, "price_cache_read_per_million": None, "currency": "RUB",
                 "source": "unknown", **found}

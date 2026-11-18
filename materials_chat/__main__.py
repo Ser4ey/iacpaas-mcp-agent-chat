@@ -53,8 +53,12 @@ def main():
                     time.sleep(0.1)
             else:
                 raise RuntimeError("MCP-сервер не успел запуститься.")
+        from .config import public_endpoint
         from .web import create_app
-        print(f"\nОткройте http://127.0.0.1:{settings.app_port}  |  Ctrl+C — остановить\n", flush=True)
+        own = settings.model_settings_prefix == "LLM"
+        print(f"\nМодель: {settings.model_name or '(не задана)'} — {public_endpoint(settings.model_base_url)} "
+              f"({'своя модель, LLM_*' if own else 'RouterAI, ROUTERAI_*'})", flush=True)
+        print(f"Откройте http://127.0.0.1:{settings.app_port}  |  Ctrl+C — остановить\n", flush=True)
         uvicorn.run(create_app(settings), host=settings.app_host, port=settings.app_port, log_level="warning")
     except OSError:
         print("Порт занят или недоступен. Измените APP_PORT/MCP_PORT/MCP_URL в .env.", file=sys.stderr)
